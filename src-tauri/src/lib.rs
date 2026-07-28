@@ -30,11 +30,25 @@ struct ProjectConfig {
     id: String,
     name: String,
     directory: String,
+    // Kept for backwards-compatible reads of existing project files.
     command: String,
     #[serde(default)]
     env: Vec<EnvVariable>,
     port: Option<u16>,
+    #[serde(default)]
+    tasks: Vec<ProjectTask>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectTask {
+    id: String,
+    name: String,
+    command: String,
+    mode: String,
+}
+
+const MAX_PROJECT_TASKS: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -46,38 +60,36 @@ struct StoreFile {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeStatus {
+    run_id: String,
     project_id: String,
+    task_id: String,
+    task_name: String,
+    mode: String,
     state: String,
     pid: Option<u32>,
     started_at: Option<u64>,
     exit_code: Option<i32>,
 }
 
-impl RuntimeStatus {
-    fn stopped(project_id: String, exit_code: Option<i32>) -> Self {
-        Self {
-            project_id,
-            state: "stopped".into(),
-            pid: None,
-            started_at: None,
-            exit_code,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LogEvent {
+    run_id: String,
     project_id: String,
     stream: String,
     message: String,
     timestamp: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DetectedProjectName {
+    name: String,
+    source: String,
+}
+
 struct ManagedProcess {
     child: Child,
-    pid: u32,
-    started_at: u64,
     #[cfg(target_os = "windows")]
     job: JobHandle,
 }
@@ -163,6 +175,7 @@ impl Drop for JobHandle {
 #[derive(Default)]
 struct AppState {
     processes: Mutex<HashMap<String, ManagedProcess>>,
+    runs: Mutex<HashMap<String, RuntimeStatus>>,
     exit_codes: Mutex<HashMap<String, Option<i32>>>,
 }
 
@@ -199,12 +212,55 @@ fn save_store(app: &AppHandle, store: &StoreFile) -> Result<(), String> {
     fs::write(path, content).map_err(|error| format!("无法保存配置：{error}"))
 }
 
+fn normalize_project(project: &mut ProjectConfig) {
+    if project.tasks.is_empty() {
+        project.tasks.push(ProjectTask {
+            id: "default".into(),
+            name: "开发服务器".into(),
+            command: project.command.clone(),
+            mode: "service".into(),
+        });
+    }
+    project.tasks.truncate(MAX_PROJECT_TASKS);
+    for task in &mut project.tasks {
+        task.id = if task.id.trim().is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            task.id.trim().to_owned()
+        };
+        task.name = task.name.trim().to_owned();
+        task.command = task.command.trim().to_owned();
+        task.mode = task.mode.trim().to_lowercase();
+    }
+    project.command = project
+        .tasks
+        .first()
+        .map(|task| task.command.clone())
+        .unwrap_or_default();
+}
+
 fn validate_project(project: &ProjectConfig) -> Result<(), String> {
     if project.name.trim().is_empty() {
         return Err("项目名称不能为空".into());
     }
-    if project.command.trim().is_empty() {
-        return Err("启动命令不能为空".into());
+    if project.tasks.is_empty() {
+        return Err("至少需要配置一个任务".into());
+    }
+    if project.tasks.len() > MAX_PROJECT_TASKS {
+        return Err(format!("预设任务最多只能配置 {MAX_PROJECT_TASKS} 条"));
+    }
+    if project.tasks.iter().any(|task| task.name.is_empty()) {
+        return Err("任务名称不能为空".into());
+    }
+    if project.tasks.iter().any(|task| task.command.is_empty()) {
+        return Err("任务命令不能为空".into());
+    }
+    if project
+        .tasks
+        .iter()
+        .any(|task| task.mode != "service" && task.mode != "once")
+    {
+        return Err("任务类型必须是 service 或 once".into());
     }
     let directory = Path::new(project.directory.trim());
     if !directory.is_dir() {
@@ -216,20 +272,154 @@ fn validate_project(project: &ProjectConfig) -> Result<(), String> {
     Ok(())
 }
 
+fn quoted_value(value: &str) -> Option<String> {
+    let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn section_value(content: &str, section: &str, key: &str) -> Option<String> {
+    let mut in_section = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_section = line == section;
+            continue;
+        }
+        if in_section {
+            let Some((candidate, value)) = line.split_once('=') else {
+                continue;
+            };
+            if candidate.trim() == key {
+                return quoted_value(value.split('#').next().unwrap_or_default());
+            }
+        }
+    }
+    None
+}
+
+fn file_name(path: &Path, source: &str) -> Option<DetectedProjectName> {
+    let content = fs::read_to_string(path).ok()?;
+    let name = match source {
+        "package.json" => serde_json::from_str::<serde_json::Value>(&content)
+            .ok()?
+            .get("name")?
+            .as_str()?
+            .to_owned(),
+        "composer.json" => serde_json::from_str::<serde_json::Value>(&content)
+            .ok()?
+            .get("name")?
+            .as_str()?
+            .rsplit('/')
+            .next()?
+            .to_owned(),
+        "Cargo.toml" => section_value(&content, "[package]", "name")?,
+        "pyproject.toml" => section_value(&content, "[project]", "name")?,
+        "pubspec.yaml" => content
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("name:").and_then(quoted_value))?,
+        "go.mod" => content
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("module ").and_then(quoted_value))?
+            .rsplit('/')
+            .next()?
+            .to_owned(),
+        "pom.xml" => content
+            .split("<artifactId>")
+            .nth(1)?
+            .split("</artifactId>")
+            .next()?
+            .trim()
+            .to_owned(),
+        _ => return None,
+    };
+    (!name.is_empty()).then(|| DetectedProjectName {
+        name,
+        source: source.into(),
+    })
+}
+
+fn csproj_name(directory: &Path) -> Option<DetectedProjectName> {
+    let path = fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("csproj"))
+        })?;
+    let content = fs::read_to_string(&path).ok()?;
+    let name = content
+        .split("<AssemblyName>")
+        .nth(1)
+        .and_then(|value| value.split("</AssemblyName>").next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })?;
+    Some(DetectedProjectName {
+        name,
+        source: path.file_name()?.to_string_lossy().into_owned(),
+    })
+}
+
+#[tauri::command]
+fn detect_project_name(directory: String) -> Result<DetectedProjectName, String> {
+    let directory = PathBuf::from(directory.trim());
+    if !directory.is_dir() {
+        return Err("项目目录不存在或不是文件夹".into());
+    }
+    for source in [
+        "package.json",
+        "Cargo.toml",
+        "pyproject.toml",
+        "go.mod",
+        "pom.xml",
+        "pubspec.yaml",
+        "composer.json",
+    ] {
+        if let Some(detected) = file_name(&directory.join(source), source) {
+            return Ok(detected);
+        }
+    }
+    if let Some(detected) = csproj_name(&directory) {
+        return Ok(detected);
+    }
+    let name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "无法从项目目录推断名称".to_owned())?;
+    Ok(DetectedProjectName {
+        name: name.to_owned(),
+        source: "目录名".into(),
+    })
+}
+
 #[tauri::command]
 fn list_projects(app: AppHandle) -> Result<Vec<ProjectConfig>, String> {
-    Ok(load_store(&app)?.projects)
+    let mut store = load_store(&app)?;
+    for project in &mut store.projects {
+        normalize_project(project);
+    }
+    Ok(store.projects)
 }
 
 #[tauri::command]
 fn save_project(app: AppHandle, mut project: ProjectConfig) -> Result<ProjectConfig, String> {
     project.name = project.name.trim().to_owned();
     project.directory = project.directory.trim().to_owned();
-    project.command = project.command.trim().to_owned();
     project.env.retain(|item| !item.key.trim().is_empty());
     for item in &mut project.env {
         item.key = item.key.trim().to_owned();
     }
+    if project.tasks.len() > MAX_PROJECT_TASKS {
+        return Err(format!("预设任务最多只能配置 {MAX_PROJECT_TASKS} 条"));
+    }
+    normalize_project(&mut project);
     validate_project(&project)?;
 
     let mut store = load_store(&app)?;
@@ -246,13 +436,19 @@ fn save_project(app: AppHandle, mut project: ProjectConfig) -> Result<ProjectCon
 }
 
 fn delete_project_inner(app: &AppHandle, state: &AppState, project_id: &str) -> Result<(), String> {
-    if state
-        .processes
+    let run_ids = state
+        .runs
         .lock()
         .map_err(|_| "进程状态锁已损坏")?
-        .contains_key(project_id)
-    {
-        stop_project_inner(app, state, project_id)?;
+        .values()
+        .filter(|status| {
+            status.project_id == project_id
+                && matches!(status.state.as_str(), "starting" | "running" | "stopping")
+        })
+        .map(|status| status.run_id.clone())
+        .collect::<Vec<_>>();
+    for run_id in run_ids {
+        let _ = stop_run_inner(app, state, &run_id)?;
     }
 
     let mut store = load_store(app)?;
@@ -270,10 +466,17 @@ async fn delete_project(app: AppHandle, project_id: String) -> Result<(), String
     .map_err(|error| format!("删除项目后台任务失败：{error}"))?
 }
 
-fn emit_log(app: &AppHandle, project_id: &str, stream: &str, message: impl Into<String>) {
+fn emit_log(
+    app: &AppHandle,
+    run_id: &str,
+    project_id: &str,
+    stream: &str,
+    message: impl Into<String>,
+) {
     let _ = app.emit(
         "project-log",
         LogEvent {
+            run_id: run_id.to_owned(),
             project_id: project_id.to_owned(),
             stream: stream.to_owned(),
             message: message.into(),
@@ -284,6 +487,7 @@ fn emit_log(app: &AppHandle, project_id: &str, stream: &str, message: impl Into<
 
 fn pipe_logs<R: Read + Send + 'static>(
     app: AppHandle,
+    run_id: String,
     project_id: String,
     stream: &'static str,
     reader: R,
@@ -301,6 +505,7 @@ fn pipe_logs<R: Read + Send + 'static>(
                     }
                     emit_log(
                         &app,
+                        &run_id,
                         &project_id,
                         stream,
                         String::from_utf8_lossy(&buffer).into_owned(),
@@ -309,6 +514,7 @@ fn pipe_logs<R: Read + Send + 'static>(
                 Err(error) => {
                     emit_log(
                         &app,
+                        &run_id,
                         &project_id,
                         "system",
                         format!("读取日志失败：{error}"),
@@ -320,13 +526,13 @@ fn pipe_logs<R: Read + Send + 'static>(
     });
 }
 
-fn shell_command(project: &ProjectConfig) -> Command {
+fn shell_command(command_line: &str) -> Command {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         // Keep the user's PowerShell profile so fnm and other shell-managed tools are available.
-        let script = format!("& {{ {} }}", project.command);
+        let script = format!("& {{ {command_line} }}");
         let mut command = Command::new("pwsh.exe");
         command
             .args(["-NoLogo", "-NonInteractive", "-Command", &script])
@@ -338,39 +544,46 @@ fn shell_command(project: &ProjectConfig) -> Command {
     {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new("sh");
-        command.args(["-lc", &project.command]).process_group(0);
+        command.args(["-lc", command_line]).process_group(0);
         command
     }
 }
 
-fn start_project_inner(
-    app: &AppHandle,
-    state: &AppState,
-    project_id: &str,
-) -> Result<RuntimeStatus, String> {
-    {
-        let mut processes = state.processes.lock().map_err(|_| "进程状态锁已损坏")?;
-        if let Some(process) = processes.get_mut(project_id) {
-            if process
-                .child
-                .try_wait()
-                .map_err(|error| error.to_string())?
-                .is_none()
-            {
-                return Err("项目已经在运行".into());
-            }
-            processes.remove(project_id);
-        }
-    }
-
-    let project = load_store(app)?
+fn load_project(app: &AppHandle, project_id: &str) -> Result<ProjectConfig, String> {
+    let mut project = load_store(app)?
         .projects
         .into_iter()
         .find(|project| project.id == project_id)
         .ok_or_else(|| "未找到项目配置".to_owned())?;
+    normalize_project(&mut project);
     validate_project(&project)?;
+    Ok(project)
+}
 
-    let mut command = shell_command(&project);
+fn start_task_inner(
+    app: &AppHandle,
+    state: &AppState,
+    project: &ProjectConfig,
+    task: ProjectTask,
+) -> Result<RuntimeStatus, String> {
+    if task.mode == "service" {
+        let has_active_instance = state
+            .runs
+            .lock()
+            .map_err(|_| "进程状态锁已损坏")?
+            .values()
+            .any(|status| {
+                status.project_id == project.id
+                    && status.task_id == task.id
+                    && matches!(status.state.as_str(), "starting" | "running" | "stopping")
+            });
+        if has_active_instance {
+            return Err("该常驻任务已经在运行".into());
+        }
+    }
+
+    let run_id = Uuid::new_v4().to_string();
+    let mut command = shell_command(&task.command);
     command
         .current_dir(&project.directory)
         .stdin(Stdio::null())
@@ -391,10 +604,22 @@ fn start_project_inner(
     let pid = child.id();
     let started_at = now_millis();
     if let Some(stdout) = child.stdout.take() {
-        pipe_logs(app.clone(), project.id.clone(), "stdout", stdout);
+        pipe_logs(
+            app.clone(),
+            run_id.clone(),
+            project.id.clone(),
+            "stdout",
+            stdout,
+        );
     }
     if let Some(stderr) = child.stderr.take() {
-        pipe_logs(app.clone(), project.id.clone(), "stderr", stderr);
+        pipe_logs(
+            app.clone(),
+            run_id.clone(),
+            project.id.clone(),
+            "stderr",
+            stderr,
+        );
     }
 
     state
@@ -402,46 +627,84 @@ fn start_project_inner(
         .lock()
         .map_err(|_| "进程状态锁已损坏")?
         .insert(
-            project.id.clone(),
+            run_id.clone(),
             ManagedProcess {
                 child,
-                pid,
-                started_at,
                 #[cfg(target_os = "windows")]
                 job,
             },
         );
-    state
-        .exit_codes
-        .lock()
-        .map_err(|_| "退出状态锁已损坏")?
-        .remove(&project.id);
-
     let status = RuntimeStatus {
+        run_id: run_id.clone(),
         project_id: project.id.clone(),
+        task_id: task.id.clone(),
+        task_name: task.name.clone(),
+        mode: task.mode.clone(),
         state: "running".into(),
         pid: Some(pid),
         started_at: Some(started_at),
         exit_code: None,
     };
     emit_log(
-        &app,
+        app,
+        &run_id,
         &project.id,
         "system",
-        format!("已在后台启动 · PID {pid}"),
+        format!("已启动「{}」· PID {pid}", task.name),
     );
+    state
+        .runs
+        .lock()
+        .map_err(|_| "进程状态锁已损坏")?
+        .insert(run_id, status.clone());
     let _ = app.emit("project-status", status.clone());
     Ok(status)
 }
 
 #[tauri::command]
-async fn start_project(app: AppHandle, project_id: String) -> Result<RuntimeStatus, String> {
+async fn run_task(
+    app: AppHandle,
+    project_id: String,
+    task_id: String,
+) -> Result<RuntimeStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        start_project_inner(&app, state.inner(), &project_id)
+        let project = load_project(&app, &project_id)?;
+        let task = project
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .cloned()
+            .ok_or_else(|| "未找到项目任务".to_owned())?;
+        start_task_inner(&app, state.inner(), &project, task)
     })
     .await
-    .map_err(|error| format!("启动项目后台任务失败：{error}"))?
+    .map_err(|error| format!("执行项目任务失败：{error}"))?
+}
+
+#[tauri::command]
+async fn run_temporary_command(
+    app: AppHandle,
+    project_id: String,
+    command: String,
+) -> Result<RuntimeStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project = load_project(&app, &project_id)?;
+        let command = command.trim().to_owned();
+        if command.is_empty() {
+            return Err("临时命令不能为空".into());
+        }
+        let task = ProjectTask {
+            id: format!("temporary-{}", Uuid::new_v4()),
+            name: "临时命令".into(),
+            command,
+            mode: "once".into(),
+        };
+        let state = app.state::<AppState>();
+        start_task_inner(&app, state.inner(), &project, task)
+    })
+    .await
+    .map_err(|error| format!("执行临时命令失败：{error}"))?
 }
 
 fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<Option<ExitStatus>, String> {
@@ -474,19 +737,26 @@ fn terminate_process_tree(process: &ManagedProcess) -> Result<(), String> {
     Ok(())
 }
 
-fn stop_project_inner(
+fn stop_run_inner(
     app: &AppHandle,
     state: &AppState,
-    project_id: &str,
+    run_id: &str,
 ) -> Result<RuntimeStatus, String> {
+    let mut status = state
+        .runs
+        .lock()
+        .map_err(|_| "进程状态锁已损坏")?
+        .get(run_id)
+        .cloned()
+        .ok_or_else(|| "未找到运行实例".to_owned())?;
     let process = state
         .processes
         .lock()
         .map_err(|_| "进程状态锁已损坏")?
-        .remove(project_id);
+        .remove(run_id);
 
     let Some(mut process) = process else {
-        return Ok(RuntimeStatus::stopped(project_id.to_owned(), None));
+        return Ok(status);
     };
 
     let mut termination_messages = Vec::new();
@@ -518,39 +788,79 @@ fn stop_project_inner(
             });
     }
     let exit_code = exit_status.and_then(|status| status.code());
+    status.state = "stopped".into();
+    status.pid = None;
+    status.exit_code = exit_code;
     state
-        .exit_codes
+        .runs
         .lock()
-        .map_err(|_| "退出状态锁已损坏")?
-        .insert(project_id.to_owned(), exit_code);
-    let status = RuntimeStatus::stopped(project_id.to_owned(), exit_code);
+        .map_err(|_| "进程状态锁已损坏")?
+        .insert(run_id.to_owned(), status.clone());
     for message in termination_messages {
-        emit_log(app, project_id, "system", format!("回收提示：{message}"));
+        emit_log(
+            app,
+            run_id,
+            &status.project_id,
+            "system",
+            format!("回收提示：{message}"),
+        );
     }
-    emit_log(app, project_id, "system", "项目已停止，子进程已回收");
+    emit_log(
+        app,
+        run_id,
+        &status.project_id,
+        "system",
+        "任务已停止，子进程已回收",
+    );
     let _ = app.emit("project-status", status.clone());
     Ok(status)
 }
 
 #[tauri::command]
-async fn stop_project(app: AppHandle, project_id: String) -> Result<RuntimeStatus, String> {
+async fn stop_run(app: AppHandle, run_id: String) -> Result<RuntimeStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        stop_project_inner(&app, state.inner(), &project_id)
+        stop_run_inner(&app, state.inner(), &run_id)
     })
     .await
-    .map_err(|error| format!("停止项目后台任务失败：{error}"))?
+    .map_err(|error| format!("停止任务后台操作失败：{error}"))?
 }
 
 #[tauri::command]
-async fn restart_project(app: AppHandle, project_id: String) -> Result<RuntimeStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let _ = stop_project_inner(&app, state.inner(), &project_id)?;
-        start_project_inner(&app, state.inner(), &project_id)
-    })
-    .await
-    .map_err(|error| format!("重启项目后台任务失败：{error}"))?
+fn dismiss_run(state: State<'_, AppState>, run_id: String) -> Result<(), String> {
+    let mut runs = state.runs.lock().map_err(|_| "进程状态锁已损坏")?;
+    let status = runs
+        .get(&run_id)
+        .ok_or_else(|| "未找到运行实例".to_owned())?;
+    if matches!(status.state.as_str(), "starting" | "running" | "stopping") {
+        return Err("运行中的任务不能移除记录".into());
+    }
+    runs.remove(&run_id);
+    drop(runs);
+    state
+        .exit_codes
+        .lock()
+        .map_err(|_| "退出状态锁已损坏")?
+        .remove(&run_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn dismiss_inactive_runs(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let mut runs = state.runs.lock().map_err(|_| "进程状态锁已损坏")?;
+    let removed_run_ids = runs
+        .iter()
+        .filter(|(_, status)| !matches!(status.state.as_str(), "starting" | "running" | "stopping"))
+        .map(|(run_id, _)| run_id.clone())
+        .collect::<Vec<_>>();
+    runs.retain(|run_id, _| !removed_run_ids.contains(run_id));
+    drop(runs);
+
+    let mut exit_codes = state.exit_codes.lock().map_err(|_| "退出状态锁已损坏")?;
+    for run_id in &removed_run_ids {
+        exit_codes.remove(run_id);
+    }
+    Ok(removed_run_ids)
 }
 
 #[tauri::command]
@@ -558,33 +868,45 @@ fn list_runtime_status(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<RuntimeStatus>, String> {
-    let projects = load_store(&app)?.projects;
     let mut processes = state.processes.lock().map_err(|_| "进程状态锁已损坏")?;
     let mut exited = Vec::new();
 
-    for (project_id, process) in processes.iter_mut() {
+    for (run_id, process) in processes.iter_mut() {
         if let Some(status) = process
             .child
             .try_wait()
             .map_err(|error| error.to_string())?
         {
-            exited.push((project_id.clone(), status.code()));
+            exited.push((run_id.clone(), status.code()));
         }
     }
-    for (project_id, exit_code) in &exited {
-        processes.remove(project_id);
-        state
-            .exit_codes
-            .lock()
-            .map_err(|_| "退出状态锁已损坏")?
-            .insert(project_id.clone(), *exit_code);
-        let status = RuntimeStatus::stopped(project_id.clone(), *exit_code);
+    for (run_id, exit_code) in &exited {
+        processes.remove(run_id);
+        let mut runs = state.runs.lock().map_err(|_| "进程状态锁已损坏")?;
+        let Some(status) = runs.get_mut(run_id) else {
+            continue;
+        };
+        status.state = if status.mode == "once" {
+            if exit_code == &Some(0) {
+                "succeeded"
+            } else {
+                "failed"
+            }
+        } else {
+            "stopped"
+        }
+        .into();
+        status.pid = None;
+        status.exit_code = *exit_code;
+        let status = status.clone();
+        drop(runs);
         emit_log(
             &app,
-            project_id,
+            run_id,
+            &status.project_id,
             "system",
             format!(
-                "进程已退出 · code {}",
+                "任务已结束 · code {}",
                 exit_code.map_or_else(|| "-".into(), |code| code.to_string())
             ),
         );
@@ -592,7 +914,17 @@ fn list_runtime_status(
     }
 
     let exit_codes = state.exit_codes.lock().map_err(|_| "退出状态锁已损坏")?;
-    Ok(projects
+    let mut statuses = state
+        .runs
+        .lock()
+        .map_err(|_| "进程状态锁已损坏")?
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let _ = &exit_codes;
+    statuses.sort_by_key(|status| std::cmp::Reverse(status.started_at.unwrap_or_default()));
+    Ok(statuses)
+    /*
         .into_iter()
         .map(|project| {
             if let Some(process) = processes.get(&project.id) {
@@ -611,6 +943,7 @@ fn list_runtime_status(
             }
         })
         .collect())
+    */
 }
 
 #[tauri::command]
@@ -637,7 +970,38 @@ fn open_in_vscode(app: AppHandle, directory: String) -> Result<(), String> {
         .spawn()
         .map_err(|error| format!("无法打开 VS Code：{error}"))?;
 
-    emit_log(&app, "app", "system", "已请求 VS Code 打开项目");
+    emit_log(&app, "app", "app", "system", "已请求 VS Code 打开项目");
+    Ok(())
+}
+
+#[tauri::command]
+fn open_in_file_manager(app: AppHandle, directory: String) -> Result<(), String> {
+    if !Path::new(&directory).is_dir() {
+        return Err("项目目录不存在".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        Command::new("explorer.exe")
+            .arg(&directory)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|error| format!("无法打开文件管理器：{error}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    Command::new("open")
+        .arg(&directory)
+        .spawn()
+        .map_err(|error| format!("无法打开文件管理器：{error}"))?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Command::new("xdg-open")
+        .arg(&directory)
+        .spawn()
+        .map_err(|error| format!("无法打开文件管理器：{error}"))?;
+
+    emit_log(&app, "app", "app", "system", "已请求文件管理器打开项目");
     Ok(())
 }
 
@@ -717,10 +1081,95 @@ fn stop_all_processes(state: &AppState) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(tasks: Vec<ProjectTask>) -> ProjectConfig {
+        ProjectConfig {
+            id: "project-1".into(),
+            name: "测试项目".into(),
+            directory: ".".into(),
+            command: "pnpm dev".into(),
+            env: Vec::new(),
+            port: None,
+            tasks,
+        }
+    }
+
+    #[test]
+    fn legacy_command_becomes_default_service_task() {
+        let mut project = project(Vec::new());
+        normalize_project(&mut project);
+
+        assert_eq!(project.tasks.len(), 1);
+        assert_eq!(project.tasks[0].name, "开发服务器");
+        assert_eq!(project.tasks[0].command, "pnpm dev");
+        assert_eq!(project.tasks[0].mode, "service");
+    }
+
+    #[test]
+    fn task_modes_must_be_service_or_once() {
+        let mut project = project(vec![ProjectTask {
+            id: "build".into(),
+            name: "构建".into(),
+            command: "pnpm build".into(),
+            mode: "background".into(),
+        }]);
+        normalize_project(&mut project);
+
+        assert!(validate_project(&project).is_err());
+    }
+
+    #[test]
+    fn project_accepts_at_most_three_preset_tasks() {
+        let project = project(
+            (0..4)
+                .map(|index| ProjectTask {
+                    id: format!("task-{index}"),
+                    name: format!("任务 {index}"),
+                    command: "pnpm dev".into(),
+                    mode: "service".into(),
+                })
+                .collect(),
+        );
+
+        assert!(validate_project(&project).is_err());
+    }
+
+    #[test]
+    fn reads_project_name_from_toml_sections() {
+        let content = "[build-system]\nrequires = []\n\n[project]\nname = \"utility-kit\"\n";
+        assert_eq!(
+            section_value(content, "[project]", "name"),
+            Some("utility-kit".into())
+        );
+    }
+
+    #[test]
+    fn detects_package_name_from_directory_manifest() {
+        let directory = std::env::temp_dir().join(format!("runvoke-name-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("package.json"),
+            r#"{ "name": "sample-dashboard" }"#,
+        )
+        .unwrap();
+
+        let detected = detect_project_name(directory.to_string_lossy().into_owned()).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+
+        assert_eq!(detected.name, "sample-dashboard");
+        assert_eq!(detected.source, "package.json");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -728,13 +1177,17 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             list_projects,
+            detect_project_name,
             save_project,
             delete_project,
-            start_project,
-            stop_project,
-            restart_project,
+            run_task,
+            run_temporary_command,
+            stop_run,
+            dismiss_run,
+            dismiss_inactive_runs,
             list_runtime_status,
             open_in_vscode,
+            open_in_file_manager,
             get_autostart_enabled,
             set_autostart_enabled,
         ])

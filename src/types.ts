@@ -10,12 +10,26 @@ export interface ProjectConfig {
   command: string
   env: EnvVariable[]
   port: number | null
+  tasks: ProjectTask[]
 }
 
-export type ProcessState = 'starting' | 'running' | 'stopping' | 'stopped'
+export type TaskMode = 'service' | 'once'
+
+export interface ProjectTask {
+  id: string
+  name: string
+  command: string
+  mode: TaskMode
+}
+
+export type ProcessState = 'starting' | 'running' | 'stopping' | 'stopped' | 'succeeded' | 'failed'
 
 export interface RuntimeStatus {
+  runId: string
   projectId: string
+  taskId: string
+  taskName: string
+  mode: TaskMode
   state: ProcessState
   pid: number | null
   startedAt: number | null
@@ -26,6 +40,7 @@ export type LogStream = 'stdout' | 'stderr' | 'system'
 
 export interface LogEntry {
   id: string
+  runId: string
   projectId: string
   stream: LogStream
   message: string

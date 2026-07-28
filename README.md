@@ -4,14 +4,17 @@
 
 ## 功能
 
-- 管理项目名称、目录、启动命令、端口和环境变量
-- 隐藏终端窗口启动后台进程
-- 启动、停止、重启并清理完整子进程树
-- 实时查看 stdout、stderr 和系统日志
-- 查看运行状态、PID、端口和运行时长
+- 管理项目名称、目录、端口、环境变量和多个可保存任务
+- 选择目录后自动从常见项目清单识别项目名称
+- 支持常驻服务、一次任务和不保存的临时命令
+- 隐藏终端窗口启动后台进程，并同时运行同项目的多个任务
+- 按每次运行查看 stdout、stderr、系统日志、状态、PID 和退出结果
+- 停止指定运行实例并清理其完整子进程树
 - 本地持久化项目配置
 - 系统托盘驻留与随系统启动
 - 使用 VS Code 打开项目目录
+- 发现 GitHub Release 新版本后下载、安装并重启应用
+- 项目卡片右键可快速打开该项目的编辑配置
 
 ## 环境要求
 
@@ -36,3 +39,13 @@ pnpm typecheck
 pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
+
+## 发布更新
+
+更新包由 GitHub Releases 提供，应用只接受使用 Tauri 更新密钥签名的 Windows NSIS 安装包。
+
+1. 在 GitHub 仓库 Secret 中配置 `TAURI_SIGNING_PRIVATE_KEY`。
+2. 同步更新 `package.json` 与 `src-tauri/tauri.conf.json` 的版本号，例如 `0.1.1`。
+3. 推送对应标签 `v0.1.1`。
+
+GitHub Actions 会自动构建安装包、生成签名和 `latest.json`，再发布到对应 Release。不要将私钥提交到仓库。
