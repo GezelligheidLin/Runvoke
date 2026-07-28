@@ -37,6 +37,8 @@ const search = ref('')
 const formOpen = ref(false)
 const editingProject = ref<ProjectConfig | null>(null)
 const settingsOpen = ref(false)
+type Theme = 'light' | 'dark'
+const theme = ref<Theme>(readTheme())
 const saving = ref(false)
 const busyAction = ref('')
 const temporaryCommand = ref('')
@@ -92,6 +94,31 @@ const projectContextMenu = ref<ProjectContextMenu | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined
 const updateCheckInterval = 30 * 60 * 1_000
+
+function readTheme(): Theme {
+  try {
+    return window.localStorage.getItem('runvoke-theme') === 'dark' ? 'dark' : 'light'
+  }
+  catch {
+    return 'light'
+  }
+}
+
+function toggleTheme() {
+  theme.value = theme.value === 'dark' ? 'light' : 'dark'
+}
+
+watch(theme, (value) => {
+  const dark = value === 'dark'
+  document.documentElement.dataset.theme = value
+  document.body.classList.toggle('theme-dark', dark)
+  try {
+    window.localStorage.setItem('runvoke-theme', value)
+  }
+  catch {
+    // Theme persistence is optional when storage is unavailable.
+  }
+}, { immediate: true })
 
 const filteredProjects = computed(() => {
   const keyword = search.value.trim().toLocaleLowerCase()
@@ -545,7 +572,7 @@ function stateLabel(state?: string) {
 </script>
 
 <template>
-  <div class="app-frame" @contextmenu.prevent>
+  <div class="app-frame" :class="{ 'theme-dark': theme === 'dark' }" @contextmenu.prevent>
     <aside class="sidebar">
       <header class="brand-row">
         <img class="brand-mark" :src="brandIcon" alt="" aria-hidden="true" />
@@ -571,6 +598,21 @@ function stateLabel(state?: string) {
               :aria-checked="autostartEnabled"
               :disabled="busyAction === 'autostart'"
               @click="toggleAutostart"
+            ><i /></button>
+          </div>
+          <div class="settings-row theme-settings-row">
+            <div>
+              <strong>深色主题</strong>
+              <span>使用低照度界面配色</span>
+            </div>
+            <button
+              class="switch theme-switch"
+              :class="{ active: theme === 'dark' }"
+              type="button"
+              role="switch"
+              :aria-checked="theme === 'dark'"
+              :aria-label="theme === 'dark' ? '关闭深色主题' : '开启深色主题'"
+              @click="toggleTheme"
             ><i /></button>
           </div>
           <div class="settings-row update-settings-row">
