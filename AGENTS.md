@@ -25,3 +25,8 @@
 - 前端改动至少执行 `pnpm typecheck` 和 `pnpm build`。
 - Rust 改动至少执行 `cargo check --manifest-path src-tauri/Cargo.toml`。
 - 提交前说明已完成的验证以及尚未验证的内容。
+
+## 文档同步
+
+- 修改项目目标、功能范围、技术栈、目录结构、运行方式或验收标准时，必须同步更新 `PROJECT_OVERVIEW.md`、`.agents/PROJECT_PROMPT.md` 与 `.agents/skills/runvoke/SKILL.md`。
+- 仅修改实现细节且不影响上述内容时，无需更新项目文档，但应在交付说明中注明原因。
