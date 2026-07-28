@@ -333,10 +333,30 @@ function stateLabel(state?: string) {
       </template>
 
       <section v-else class="workspace-empty">
-        <span class="section-kicker">项目工作台</span>
-        <h1>暂无项目</h1>
-        <p>添加一个本地项目后，可以在这里统一管理它的后台运行状态和日志。</p>
-        <button class="launch-button" type="button" @click="openCreateForm">添加项目</button>
+        <div class="empty-copy">
+          <span class="empty-eyebrow"><i aria-hidden="true" /> 工作区 / 00</span>
+          <h1>让第一个项目<br /><em>开始运行。</em></h1>
+          <p>从一个本地目录开始，把启动命令、运行状态和日志收进同一个工作台。</p>
+          <button class="empty-add-button" type="button" @click="openCreateForm">
+            <span aria-hidden="true">+</span>
+            添加本地项目
+          </button>
+        </div>
+
+        <div class="empty-console" aria-hidden="true">
+          <div class="empty-console-bar">
+            <span class="console-dots"><i /><i /><i /></span>
+            <b>workspace.queue</b>
+            <span>READY</span>
+          </div>
+          <div class="empty-command"><span>$</span> runvoke add <i /></div>
+          <div class="empty-queue">
+            <div><span>01</span><b>选择项目目录</b><i>待命</i></div>
+            <div><span>02</span><b>设置启动命令</b><i>待命</i></div>
+            <div><span>03</span><b>进入后台运行</b><i>待命</i></div>
+          </div>
+          <div class="empty-console-footer"><span>QUEUE</span><b>0 / 3</b></div>
+        </div>
       </section>
     </main>
 
