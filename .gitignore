@@ -1,0 +1,11 @@
+node_modules
+dist
+output
+.vite
+.idea
+.vscode/*
+!.vscode/extensions.json
+src-tauri/target
+src-tauri/target-package
+*.log
+.DS_Store
