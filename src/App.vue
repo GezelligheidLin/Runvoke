@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { isTauri } from '@tauri-apps/api/core'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater'
@@ -44,7 +44,7 @@ const projectOpenMenuOpen = ref(false)
 const logFilter = ref<'all' | LogStream>('all')
 const autoScroll = ref(true)
 const toast = ref<{ type: 'success' | 'error', message: string } | null>(null)
-const availableUpdate = ref<Update | null>(null)
+const availableUpdate = shallowRef<Update | null>(null)
 const updatePopoverOpen = ref(false)
 const updateChecking = ref(false)
 const updateInstalling = ref(false)
