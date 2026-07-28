@@ -91,6 +91,7 @@ const pendingConfirmation = ref<PendingConfirmation | null>(null)
 const projectContextMenu = ref<ProjectContextMenu | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined
+const updateCheckInterval = 30 * 60 * 1_000
 
 const filteredProjects = computed(() => {
   const keyword = search.value.trim().toLocaleLowerCase()
@@ -142,7 +143,7 @@ onMounted(() => {
   window.addEventListener('contextmenu', preventNativeContextMenu)
   void nextTick(updateScrollbars)
   void checkForUpdate()
-  updateCheckTimer = window.setInterval(() => void checkForUpdate(), 4 * 60 * 60 * 1_000)
+  updateCheckTimer = window.setInterval(() => void checkForUpdate(), updateCheckInterval)
 })
 
 onBeforeUnmount(() => {
@@ -165,18 +166,22 @@ function notify(type: 'success' | 'error', message: string) {
   }, 3_200)
 }
 
-async function checkForUpdate(showNoUpdate = false) {
-  if (!isTauri() || updateInstalling.value)
+async function checkForUpdate(showResult = false) {
+  if (!isTauri() || updateInstalling.value || updateChecking.value)
     return
 
   updateChecking.value = true
   try {
     availableUpdate.value = await check()
-    if (!availableUpdate.value && showNoUpdate)
+    if (availableUpdate.value && showResult) {
+      notify('success', `发现新版本 v${availableUpdate.value.version}`)
+    }
+    else if (!availableUpdate.value && showResult) {
       notify('success', '当前已是最新版本')
+    }
   }
   catch (value) {
-    if (showNoUpdate)
+    if (showResult)
       notify('error', `检查更新失败：${String(value)}`)
   }
   finally {
@@ -553,19 +558,33 @@ function stateLabel(state?: string) {
 
       <Transition name="settings">
         <section v-if="settingsOpen" class="settings-card">
-          <div>
-            <strong>随系统启动</strong>
-            <span>登录后保持托盘驻留</span>
+          <div class="settings-row">
+            <div>
+              <strong>随系统启动</strong>
+              <span>登录后保持托盘驻留</span>
+            </div>
+            <button
+              class="switch"
+              :class="{ active: autostartEnabled }"
+              type="button"
+              role="switch"
+              :aria-checked="autostartEnabled"
+              :disabled="busyAction === 'autostart'"
+              @click="toggleAutostart"
+            ><i /></button>
           </div>
-          <button
-            class="switch"
-            :class="{ active: autostartEnabled }"
-            type="button"
-            role="switch"
-            :aria-checked="autostartEnabled"
-            :disabled="busyAction === 'autostart'"
-            @click="toggleAutostart"
-          ><i /></button>
+          <div class="settings-row update-settings-row">
+            <div>
+              <strong>应用更新</strong>
+              <span>每 30 分钟自动检查一次</span>
+            </div>
+            <button
+              class="settings-update-button"
+              type="button"
+              :disabled="updateChecking || updateInstalling"
+              @click="checkForUpdate(true)"
+            >{{ updateChecking ? '正在检查' : '检查更新' }}</button>
+          </div>
         </section>
       </Transition>
 
