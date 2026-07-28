@@ -216,7 +216,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 
 .modal-enter-active, .modal-leave-active, .toast-enter-active, .toast-leave-active, .settings-enter-active, .settings-leave-active { transition: opacity .18s ease, transform .18s ease; }
 .modal-enter-from, .modal-leave-to { opacity: 0; }
-.modal-enter-from .project-form, .modal-leave-to .project-form { transform: translateY(10px); }
+.modal-enter-from .project-form { transform: translateY(10px); }
 .toast-enter-from, .toast-leave-to { opacity: 0; transform: translateY(8px); }
 .settings-enter-from, .settings-leave-to { opacity: 0; transform: translateY(-5px); }
 
