@@ -34,7 +34,7 @@ jobs:
         run: |
           $version = node -p "require('./package.json').version"
           $tauriVersion = (Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
-          $cargoVersion = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'runvoke' | Select-Object -First 1).version
+          $cargoVersion = ((cargo metadata --manifest-path src-tauri/Cargo.toml --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'runvoke' | Select-Object -First 1).version
           if ($version -ne $tauriVersion) { throw "package.json ($version) and tauri.conf.json ($tauriVersion) must match." }
           if ($version -ne $cargoVersion) { throw "package.json ($version) and Cargo.toml ($cargoVersion) must match." }
           if ("v$version" -ne '${{ github.ref_name }}') { throw "Release tag must be v$version." }
