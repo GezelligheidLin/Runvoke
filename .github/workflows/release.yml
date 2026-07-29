@@ -99,8 +99,11 @@ jobs:
           ALIYUN_OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET }}
           ALIYUN_OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
         run: |
-          $ossutil = Join-Path $env:RUNNER_TEMP 'ossutil64.exe'
-          Invoke-WebRequest -Uri 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil64.exe' -OutFile $ossutil
+          $ossutilRoot = Join-Path $env:RUNNER_TEMP 'ossutil-v1.7.19'
+          $ossutilArchive = "$ossutilRoot.zip"
+          Invoke-WebRequest -Uri 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-windows-amd64.zip' -OutFile $ossutilArchive
+          Expand-Archive -Path $ossutilArchive -DestinationPath $ossutilRoot -Force
+          $ossutil = Join-Path $ossutilRoot 'ossutil-v1.7.19-windows-amd64/ossutil64.exe'
           & $ossutil config -e $env:ALIYUN_OSS_ENDPOINT -i $env:ALIYUN_OSS_ACCESS_KEY_ID -k $env:ALIYUN_OSS_ACCESS_KEY_SECRET -L CH
           if ($LASTEXITCODE -ne 0) { throw 'Failed to configure ossutil.' }
 
