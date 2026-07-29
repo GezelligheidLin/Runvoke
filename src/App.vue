@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
-import { isTauri } from '@tauri-apps/api/core'
+import { invoke, isTauri } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater'
 import brandIcon from '../src-tauri/icons/128x128.png'
@@ -93,6 +94,7 @@ const pendingConfirmation = ref<PendingConfirmation | null>(null)
 const projectContextMenu = ref<ProjectContextMenu | null>(null)
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined
+let scrollbarUpdateFrame: number | undefined
 const updateCheckInterval = 30 * 60 * 1_000
 
 function readTheme(): Theme {
@@ -112,6 +114,16 @@ watch(theme, (value) => {
   const dark = value === 'dark'
   document.documentElement.dataset.theme = value
   document.body.classList.toggle('theme-dark', dark)
+  if (isTauri()) {
+    const backgroundColor: [number, number, number] = dark ? [23, 26, 24] : [247, 245, 241]
+    const [red, green, blue] = backgroundColor
+    void Promise.all([
+      getCurrentWindow().setBackgroundColor(backgroundColor),
+      invoke('set_resize_paint_color', { red, green, blue }),
+    ]).catch(() => {
+      // CSS still provides the correct fallback background if the native call fails.
+    })
+  }
   try {
     window.localStorage.setItem('runvoke-theme', value)
   }
@@ -166,7 +178,7 @@ watch(
 )
 
 onMounted(() => {
-  window.addEventListener('resize', updateScrollbars)
+  window.addEventListener('resize', scheduleScrollbarUpdate)
   window.addEventListener('contextmenu', preventNativeContextMenu)
   void nextTick(updateScrollbars)
   void checkForUpdate()
@@ -174,8 +186,10 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', updateScrollbars)
+  window.removeEventListener('resize', scheduleScrollbarUpdate)
   window.removeEventListener('contextmenu', preventNativeContextMenu)
+  if (scrollbarUpdateFrame !== undefined)
+    cancelAnimationFrame(scrollbarUpdateFrame)
   if (updateCheckTimer)
     clearInterval(updateCheckTimer)
 })
@@ -333,17 +347,22 @@ function updateScrollbar(container: HTMLElement | null, scrollbar: ScrollbarStat
 
   const visibleHeight = container.clientHeight
   const scrollableHeight = container.scrollHeight
-  scrollbar.overflow = scrollableHeight > visibleHeight + 1
-  if (!scrollbar.overflow) {
-    scrollbar.thumbHeight = 0
-    scrollbar.thumbTop = 0
-    return
-  }
-
-  scrollbar.thumbHeight = Math.min(visibleHeight, Math.max(28, Math.round(visibleHeight * visibleHeight / scrollableHeight)))
+  const overflow = scrollableHeight > visibleHeight + 1
+  const thumbHeight = overflow
+    ? Math.min(visibleHeight, Math.max(28, Math.round(visibleHeight * visibleHeight / scrollableHeight)))
+    : 0
   const scrollRange = scrollableHeight - visibleHeight
-  const trackRange = visibleHeight - scrollbar.thumbHeight
-  scrollbar.thumbTop = trackRange ? Math.round(container.scrollTop * trackRange / scrollRange) : 0
+  const trackRange = visibleHeight - thumbHeight
+  const thumbTop = overflow && trackRange
+    ? Math.round(container.scrollTop * trackRange / scrollRange)
+    : 0
+
+  if (scrollbar.overflow !== overflow)
+    scrollbar.overflow = overflow
+  if (scrollbar.thumbHeight !== thumbHeight)
+    scrollbar.thumbHeight = thumbHeight
+  if (scrollbar.thumbTop !== thumbTop)
+    scrollbar.thumbTop = thumbTop
 }
 
 function updateRunListScrollbar() {
@@ -362,6 +381,16 @@ function updateScrollbars() {
   updateRunListScrollbar()
   updateLogScrollbar()
   updateProjectListScrollbar()
+}
+
+function scheduleScrollbarUpdate() {
+  if (scrollbarUpdateFrame !== undefined)
+    return
+
+  scrollbarUpdateFrame = requestAnimationFrame(() => {
+    scrollbarUpdateFrame = undefined
+    updateScrollbars()
+  })
 }
 
 function setScrollbarHover(scrollbar: ScrollbarState, hovered: boolean) {

@@ -17,6 +17,8 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use uuid::Uuid;
 
+mod window_resize_guard;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EnvVariable {
@@ -1027,6 +1029,11 @@ fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> 
     Ok(enabled)
 }
 
+#[tauri::command]
+fn set_resize_paint_color(red: u8, green: u8, blue: u8) {
+    window_resize_guard::update_color(red, green, blue);
+}
+
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -1167,6 +1174,12 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        // Register this first so a second process exits before initializing its window or tray.
+        .plugin(tauri_plugin_single_instance::init(
+            |app, _arguments, _cwd| {
+                show_main_window(app);
+            },
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1190,15 +1203,25 @@ pub fn run() {
             open_in_file_manager,
             get_autostart_enabled,
             set_autostart_enabled,
+            set_resize_paint_color,
         ])
         .setup(|app| {
             setup_tray(app)?;
             if let Some(window) = app.get_webview_window("main") {
+                window_resize_guard::install(&window, (247, 245, 241))
+                    .map_err(std::io::Error::other)?;
                 let window_for_event = window.clone();
                 window.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = window_for_event.hide();
+                    match event {
+                        WindowEvent::Resized(_) => {
+                            // Yield once so WebView2 can consume its pending child-window resize.
+                            std::thread::sleep(Duration::from_nanos(1));
+                        }
+                        WindowEvent::CloseRequested { api, .. } => {
+                            api.prevent_close();
+                            let _ = window_for_event.hide();
+                        }
+                        _ => {}
                     }
                 });
                 if std::env::args().any(|argument| argument == "--minimized") {
