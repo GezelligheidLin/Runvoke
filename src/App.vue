@@ -8,6 +8,8 @@ import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updat
 import brandIcon from '../src-tauri/icons/128x128.png'
 import ProjectForm from './components/ProjectForm.vue'
 import ProjectGroupList from './components/ProjectGroupList.vue'
+import ResizableSplitPane from './components/ResizableSplitPane.vue'
+import SettingsPage from './components/SettingsPage.vue'
 import { useLauncher } from './composables/useLauncher'
 import type { LogStream, ProjectConfig, ProjectGroup, ProjectTask, RuntimeStatus } from './types'
 
@@ -96,6 +98,7 @@ let draggingScrollbar: {
 type PendingConfirmation = {
   message: string
   confirmLabel: string
+  variant: 'danger' | 'primary'
   top: number
   left: number
   width: number
@@ -142,10 +145,6 @@ function readLogLinkAction(): LogLinkAction {
   catch {
     return 'open'
   }
-}
-
-function toggleTheme() {
-  theme.value = theme.value === 'dark' ? 'light' : 'dark'
 }
 
 watch(theme, (value) => {
@@ -298,9 +297,9 @@ const visibleLogs = computed(() => {
   return selectedLogs.value.filter((entry) => entry.stream === logFilter.value)
 })
 
-const runningCount = computed(() =>
-  Object.values(runsById.value).filter((run) => run.state === 'running').length,
-)
+const activeRuns = computed(() => Object.values(runsById.value).filter(run => isRunActive(run.state)))
+const runningCount = computed(() => activeRuns.value.length)
+const operationsLocked = computed(() => updateInstalling.value || busyAction.value === 'stop-all')
 const visibleTasks = computed(() => selectedProject.value?.tasks.slice(0, 3) ?? [])
 const inactiveRunCount = computed(() => projectRuns.value.filter((run) => !isRunActive(run.state)).length)
 
@@ -334,6 +333,11 @@ watch(
     void nextTick(updateProjectListScrollbar)
   },
 )
+
+watch(settingsOpen, (open) => {
+  if (!open)
+    void nextTick(updateScrollbars)
+})
 
 onMounted(() => {
   window.addEventListener('resize', scheduleScrollbarUpdate)
@@ -400,6 +404,8 @@ function trackUpdateDownload(event: DownloadEvent) {
 }
 
 function updateProgressLabel() {
+  if (busyAction.value === 'update' && runningCount.value)
+    return '正在停止全部运行任务…'
   const { received, total } = updateProgress.value
   if (!total)
     return '正在下载更新…'
@@ -412,13 +418,17 @@ async function installAvailableUpdate() {
     return
 
   updateInstalling.value = true
+  busyAction.value = 'update'
   updateProgress.value = { received: 0, total: 0 }
   try {
+    await stopAllActiveRuns()
     await update.downloadAndInstall(trackUpdateDownload)
     await relaunch()
   }
   catch (value) {
     updateInstalling.value = false
+    if (busyAction.value === 'update')
+      busyAction.value = ''
     notify('error', `更新安装失败：${String(value)}`)
   }
 }
@@ -427,6 +437,13 @@ function openCreateForm() {
   closeGroupEditor()
   editingProject.value = null
   formOpen.value = true
+}
+
+function openSettingsPage() {
+  closeGroupEditor()
+  projectOpenMenuOpen.value = false
+  updatePopoverOpen.value = false
+  settingsOpen.value = true
 }
 
 function openEditForm() {
@@ -478,6 +495,7 @@ function editProjectFromContextMenu() {
 function selectProject(projectId: string) {
   selectedId.value = projectId
   activeGroupMenuId.value = null
+  settingsOpen.value = false
 }
 
 function openCreateGroup(projectId = '') {
@@ -536,6 +554,23 @@ async function handleSaveGroup() {
   finally {
     groupSaving.value = false
   }
+}
+
+function requestInstallAvailableUpdate(event: MouseEvent) {
+  if (busyAction.value) {
+    notify('error', '请等待当前操作完成后再安装更新')
+    return
+  }
+  const count = runningCount.value
+  requestConfirmation(
+    event,
+    count
+      ? `安装更新前将停止所有项目当前运行的 ${count} 个任务，并在安装完成后重启 Runvoke。是否继续？`
+      : '安装更新后将重启 Runvoke。当前没有运行中的任务，是否继续？',
+    count ? '停止全部并更新' : '确认更新',
+    installAvailableUpdate,
+    'primary',
+  )
 }
 
 async function toggleProjectGroup(section: ProjectGroupSection) {
@@ -612,6 +647,7 @@ async function handleSave(project: ProjectConfig) {
   try {
     await saveProject(project)
     formOpen.value = false
+    settingsOpen.value = false
     notify('success', project.id ? '项目配置已更新' : '项目已接入启动器')
   }
   catch (value) {
@@ -742,6 +778,7 @@ function requestConfirmation(
   message: string,
   confirmLabel: string,
   action: () => Promise<void>,
+  variant: PendingConfirmation['variant'] = 'danger',
 ) {
   const target = event.currentTarget
   if (!(target instanceof HTMLElement))
@@ -761,7 +798,7 @@ function requestConfirmation(
     window.innerWidth - popoverWidth - viewportPadding,
   )
 
-  pendingConfirmation.value = { message, confirmLabel, top, left, width: popoverWidth, action }
+  pendingConfirmation.value = { message, confirmLabel, variant, top, left, width: popoverWidth, action }
   void nextTick(() => confirmationCancelButton.value?.focus())
 }
 
@@ -775,6 +812,55 @@ async function executePendingConfirmation() {
 
 function isRunActive(state: string) {
   return ['starting', 'running', 'stopping'].includes(state)
+}
+
+async function stopAllActiveRuns() {
+  const runs = activeRuns.value
+  if (!runs.length)
+    return 0
+
+  const runIds = runs.filter(run => run.state !== 'stopping').map(run => run.runId)
+  const results = await Promise.allSettled(runIds.map(runId => stopRun(runId)))
+  const failures = results.flatMap(result => result.status === 'rejected' ? [String(result.reason)] : [])
+  if (failures.length)
+    throw new Error(`${failures.length} 个任务停止失败：${failures[0]}`)
+
+  const deadline = Date.now() + 15_000
+  while (activeRuns.value.length) {
+    if (Date.now() >= deadline)
+      throw new Error('等待全部任务停止超时，请检查运行日志后重试')
+    await new Promise<void>(resolve => window.setTimeout(resolve, 100))
+  }
+  return runs.length
+}
+
+async function handleStopAllActiveRuns() {
+  if (busyAction.value)
+    return
+  busyAction.value = 'stop-all'
+  try {
+    const count = await stopAllActiveRuns()
+    notify('success', `已停止 ${count} 个运行任务`)
+  }
+  catch (value) {
+    notify('error', String(value))
+  }
+  finally {
+    if (busyAction.value === 'stop-all')
+      busyAction.value = ''
+  }
+}
+
+function confirmStopAllActiveRuns(event: MouseEvent) {
+  const count = runningCount.value
+  if (!count)
+    return
+  requestConfirmation(
+    event,
+    `确定停止所有项目当前运行的 ${count} 个任务吗？相关子进程也会一并回收。`,
+    '停止全部',
+    handleStopAllActiveRuns,
+  )
 }
 
 function projectState(projectId: string) {
@@ -804,6 +890,8 @@ function confirmStopRun(event: MouseEvent, run: RuntimeStatus) {
 }
 
 async function handleTaskAction(event: MouseEvent, task: ProjectTask) {
+  if (operationsLocked.value)
+    return
   const activeRun = activeRunForTask(task.id)
   if (activeRun) {
     confirmStopRun(event, activeRun)
@@ -836,7 +924,7 @@ function handleDismissInactiveRuns(event: MouseEvent) {
 async function handleTemporaryCommand() {
   const project = selectedProject.value
   const command = temporaryCommand.value.trim()
-  if (!project || !command)
+  if (!project || !command || operationsLocked.value)
     return
   await perform('temporary', () => runTemporaryCommand(project.id, command), '临时命令已开始执行')
   temporaryCommand.value = ''
@@ -892,73 +980,33 @@ function stateLabel(state?: string) {
 </script>
 
 <template>
-  <div class="app-frame" :class="{ 'theme-dark': theme === 'dark' }" @contextmenu.prevent>
-    <aside class="sidebar">
+  <div class="app-root" :class="{ 'theme-dark': theme === 'dark' }" @contextmenu.prevent>
+    <ResizableSplitPane
+      class="app-frame"
+      :disabled="settingsOpen"
+      :initial-start-size="292"
+      :min-start-size="220"
+      :min-end-size="580"
+      :max-start-size="420"
+      storage-key="runvoke:workspace-sidebar-width"
+      label="调整项目侧栏宽度"
+    >
+      <template #start>
+        <aside class="sidebar">
       <header class="brand-row">
         <img class="brand-mark" :src="brandIcon" alt="" aria-hidden="true" />
         <div>
           <strong>Runvoke</strong>
           <span>本地开发工作台</span>
         </div>
-        <button class="settings-button" type="button" aria-label="设置" :aria-expanded="settingsOpen" @click="settingsOpen = !settingsOpen">设置</button>
+        <button
+          class="settings-button"
+          :class="{ active: settingsOpen }"
+          type="button"
+          :aria-current="settingsOpen ? 'page' : undefined"
+          @click="openSettingsPage"
+        >设置</button>
       </header>
-
-      <Transition name="settings">
-        <section v-if="settingsOpen" class="settings-card">
-          <div class="settings-row">
-            <div>
-              <strong>随系统启动</strong>
-              <span>登录后保持托盘驻留</span>
-            </div>
-            <button
-              class="switch"
-              :class="{ active: autostartEnabled }"
-              type="button"
-              role="switch"
-              :aria-checked="autostartEnabled"
-              :disabled="busyAction === 'autostart'"
-              @click="toggleAutostart"
-            ><i /></button>
-          </div>
-          <div class="settings-row theme-settings-row">
-            <div>
-              <strong>深色主题</strong>
-              <span>使用低照度界面配色</span>
-            </div>
-            <button
-              class="switch theme-switch"
-              :class="{ active: theme === 'dark' }"
-              type="button"
-              role="switch"
-              :aria-checked="theme === 'dark'"
-              :aria-label="theme === 'dark' ? '关闭深色主题' : '开启深色主题'"
-              @click="toggleTheme"
-            ><i /></button>
-          </div>
-          <div class="settings-row log-link-settings-row">
-            <div>
-              <strong>日志链接</strong>
-              <span>点击链接时执行</span>
-            </div>
-            <div class="settings-choice" role="radiogroup" aria-label="点击日志链接时执行">
-              <button type="button" role="radio" :aria-checked="logLinkAction === 'open'" :class="{ active: logLinkAction === 'open' }" @click="logLinkAction = 'open'">浏览器</button>
-              <button type="button" role="radio" :aria-checked="logLinkAction === 'copy'" :class="{ active: logLinkAction === 'copy' }" @click="logLinkAction = 'copy'">复制</button>
-            </div>
-          </div>
-          <div class="settings-row update-settings-row">
-            <div>
-              <strong>应用更新</strong>
-              <span>每 30 分钟自动检查一次</span>
-            </div>
-            <button
-              class="settings-update-button"
-              type="button"
-              :disabled="updateChecking || updateInstalling"
-              @click="checkForUpdate(true)"
-            >{{ updateChecking ? '正在检查' : '检查更新' }}</button>
-          </div>
-        </section>
-      </Transition>
 
       <div class="fleet-heading">
         <div>
@@ -966,6 +1014,14 @@ function stateLabel(state?: string) {
           <b>{{ runningCount ? `${runningCount} 个任务运行中` : '当前没有运行任务' }} · 共 {{ projects.length }} 个项目</b>
         </div>
         <div class="fleet-actions">
+          <button
+            class="stop-all-button"
+            type="button"
+            aria-label="停止全部项目任务"
+            title="停止全部项目任务"
+            :disabled="!runningCount || Boolean(busyAction) || updateInstalling"
+            @click="confirmStopAllActiveRuns"
+          ><i aria-hidden="true" /></button>
           <button class="add-button" type="button" aria-label="添加项目" title="添加项目" @click="openCreateForm">+</button>
         </div>
       </div>
@@ -1079,15 +1135,37 @@ function stateLabel(state?: string) {
             <small v-if="updateInstalling">{{ updateProgressLabel() }}</small>
             <div>
               <button type="button" :disabled="updateInstalling || updateChecking" @click="checkForUpdate(true)">重新检查</button>
-              <button class="update-install-button" type="button" :disabled="updateInstalling" @click="installAvailableUpdate">{{ updateInstalling ? '正在安装' : '下载并安装' }}</button>
+              <button class="update-install-button" type="button" :disabled="updateInstalling" @click="requestInstallAvailableUpdate">{{ updateInstalling ? '正在安装' : '下载并安装' }}</button>
             </div>
           </section>
         </Transition>
       </footer>
-    </aside>
+        </aside>
+      </template>
 
-    <main class="workspace">
-      <template v-if="selectedProject">
+      <template #end>
+        <main class="workspace">
+      <SettingsPage
+        v-if="settingsOpen"
+        :autostart-enabled="autostartEnabled"
+        :autostart-busy="busyAction === 'autostart'"
+        :theme="theme"
+        :log-link-action="logLinkAction"
+        :app-version="appVersion"
+        :available-update-version="availableUpdate?.version ?? ''"
+        :available-update-body="availableUpdate?.body ?? ''"
+        :update-checking="updateChecking"
+        :update-installing="updateInstalling"
+        :update-progress-label="updateProgressLabel()"
+        @close="settingsOpen = false"
+        @toggle-autostart="toggleAutostart"
+        @set-theme="theme = $event"
+        @set-log-link-action="logLinkAction = $event"
+        @check-update="checkForUpdate(true)"
+        @install-update="requestInstallAvailableUpdate"
+      />
+
+      <template v-else-if="selectedProject">
         <header class="workspace-header">
           <div class="project-title">
             <span class="section-kicker">当前项目</span>
@@ -1123,7 +1201,7 @@ function stateLabel(state?: string) {
                 class="task-launch"
                 :class="{ running: activeRunForTask(task.id)?.state === 'running', transitioning: Boolean(activeRunForTask(task.id) && activeRunForTask(task.id)?.state !== 'running') }"
                 type="button"
-                :disabled="busyAction === `task-${task.id}` || Boolean(activeRunForTask(task.id) && busyAction === `stop-${activeRunForTask(task.id)!.runId}`)"
+                :disabled="operationsLocked || busyAction === `task-${task.id}` || Boolean(activeRunForTask(task.id) && busyAction === `stop-${activeRunForTask(task.id)!.runId}`)"
                 @click="handleTaskAction($event, task)"
               >
                 <span class="task-kind">{{ taskModeLabel(task.mode) }}</span>
@@ -1138,7 +1216,7 @@ function stateLabel(state?: string) {
             <form class="temporary-command" @submit.prevent="handleTemporaryCommand">
               <span>$</span>
               <input v-model="temporaryCommand" aria-label="临时命令" placeholder="输入一次性临时命令，例如 pnpm build" />
-              <button type="submit" :disabled="!temporaryCommand.trim() || busyAction === 'temporary'">执行</button>
+              <button type="submit" :disabled="!temporaryCommand.trim() || operationsLocked || busyAction === 'temporary'">执行</button>
             </form>
           </section>
 
@@ -1259,7 +1337,9 @@ function stateLabel(state?: string) {
           <div class="empty-console-footer"><span>QUEUE</span><b>0 / 3</b></div>
         </div>
       </section>
-    </main>
+        </main>
+      </template>
+    </ResizableSplitPane>
 
     <ProjectForm
       :open="formOpen"
@@ -1334,7 +1414,11 @@ function stateLabel(state?: string) {
             <p id="confirmation-message">{{ pendingConfirmation.message }}</p>
             <div class="confirmation-actions">
               <button ref="confirmationCancelButton" type="button" @click="pendingConfirmation = null">取消</button>
-              <button class="confirmation-danger" type="button" @click="executePendingConfirmation">{{ pendingConfirmation.confirmLabel }}</button>
+              <button
+                :class="pendingConfirmation.variant === 'danger' ? 'confirmation-danger' : 'confirmation-primary'"
+                type="button"
+                @click="executePendingConfirmation"
+              >{{ pendingConfirmation.confirmLabel }}</button>
             </div>
           </section>
         </div>
