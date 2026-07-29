@@ -21,7 +21,7 @@ Runvoke 是面向本地开发者的桌面项目启动器。它将多个项目的
 - 支持在设置中切换浅色或深色主题，并在本机保留主题偏好。
 - 设置使用独立全宽页面，按常规、运行与日志、应用更新分区；进入设置时隐藏侧栏，返回工作台后恢复项目导航。
 - 首页和设置页使用统一的可拖拽分栏；两侧均有最小宽度约束，侧栏宽度分别持久化，窗口缩小时自动收敛到可用范围。
-- 通过 GitHub Releases 检查已签名的 Windows 更新包；应用启动后及每 30 分钟自动检查，并支持在设置中立即检查。安装更新前需二次确认，并先停止所有项目任务，再下载、安装和重启应用。
+- 通过阿里云 OSS 检查已签名的 Windows 更新包，并保留 GitHub Release 作为手动下载安装的备份；应用启动后及每 30 分钟自动检查，并支持在设置中立即检查。安装更新前需二次确认，并先停止所有项目任务，再下载、安装和重启应用。
 - 禁用原生右键菜单；在项目卡片上右键可通过自定义菜单直接进入对应项目的编辑弹窗。
 
 不在当前范围内：远程项目管理、团队协作、云端同步或代管项目的构建与部署。
@@ -32,7 +32,7 @@ Runvoke 是面向本地开发者的桌面项目启动器。它将多个项目的
 - 前端：Vue 3、TypeScript、Vite、vue-draggable-plus
 - 系统与进程管理：Rust
 - 包管理器：pnpm 10
-- 发布与更新：GitHub Actions、GitHub Releases、Tauri Updater
+- 发布与更新：GitHub Actions、阿里云 OSS、GitHub Releases、Tauri Updater
 
 ## 目录说明
 
@@ -57,7 +57,7 @@ pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-发布新版本时，使 `package.json` 和 `src-tauri/tauri.conf.json` 的版本保持一致，更新 `RELEASE_NOTES.md` 中的新增功能、问题修复和体验优化，并推送同版本的 `vX.Y.Z` 标签。GitHub Actions 会构建已签名的 NSIS 安装包，将 `RELEASE_NOTES.md` 写入 Release 和 `latest.json` 更新清单。仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 必须保存更新签名私钥。
+发布新版本时，使 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml` 的版本保持一致，更新 `RELEASE_NOTES.md` 中的新增功能、问题修复和体验优化，并推送同版本的 `vX.Y.Z` 标签。GitHub Actions 会构建已签名的 NSIS 安装包，先上传版本化安装包及签名到阿里云 OSS，再上传 `latest.json` 更新清单，同时创建 GitHub Release 备份。仓库 Secret `TAURI_SIGNING_PRIVATE_KEY`、`ALIYUN_OSS_ACCESS_KEY_ID` 和 `ALIYUN_OSS_ACCESS_KEY_SECRET` 必须保存签名私钥和最小权限 OSS 写入凭据。
 
 ## 验收标准
 
@@ -76,7 +76,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - 设置中可切换浅色与深色主题；重启应用后保留用户的主题选择，且不改变项目数据或运行状态。
 - 点击侧栏设置入口后显示全宽独立设置页并隐藏侧栏；开机启动、主题、日志链接和更新功能均保持可用，通过“返回工作台”恢复侧栏和项目工作区。
 - 首页项目侧栏与设置分类侧栏均可拖拽调节宽度；分割线无额外视觉沟槽，拖拽后重启应用仍保留宽度，最小窗口下右侧主要内容不得被挤出。
-- 应用启动后及每 30 分钟检查 GitHub Release；用户可在设置中立即检查。发现新版本后，左下角显示更新标识；点击安装后需通过确认 Popover，停止并等待全部项目任务退出，再验证签名、下载、安装并重启应用。
+- 应用启动后及每 30 分钟检查阿里云 OSS 的更新清单；用户可在设置中立即检查。发现新版本后，左下角显示更新标识；点击安装后需通过确认 Popover，停止并等待全部项目任务退出，再验证签名、下载、安装并重启应用。
 - 应用内不显示原生右键菜单；项目右键菜单的“编辑”必须打开被右键项目的编辑弹窗。
 - 前端类型检查和生产构建通过；修改 Rust 代码时 Cargo 检查通过。
 
@@ -101,3 +101,4 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - 2026-07-29：将侧栏内设置面板迁移为全宽独立设置页，进入设置时隐藏侧栏，并按常规、运行与日志、应用更新分区。
 - 2026-07-29：新增停止全部项目任务入口；安装更新前增加二次确认，并在全部任务与子进程回收完成后继续更新。
 - 2026-07-29：首页与设置页接入统一可调整分栏，支持宽度边界、键盘操作和本地持久化。
+- 2026-07-29：更新清单与安装包改由阿里云 OSS 分发，标签发布自动上传版本化安装包、签名和更新清单，GitHub Release 保留为手动下载备份。

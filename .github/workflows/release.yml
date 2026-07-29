@@ -34,7 +34,9 @@ jobs:
         run: |
           $version = node -p "require('./package.json').version"
           $tauriVersion = (Get-Content 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          $cargoVersion = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq 'runvoke' | Select-Object -First 1).version
           if ($version -ne $tauriVersion) { throw "package.json ($version) and tauri.conf.json ($tauriVersion) must match." }
+          if ($version -ne $cargoVersion) { throw "package.json ($version) and Cargo.toml ($cargoVersion) must match." }
           if ("v$version" -ne '${{ github.ref_name }}') { throw "Release tag must be v$version." }
 
       - name: Build signed updater package
@@ -42,8 +44,32 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
+      - name: Validate OSS configuration
+        shell: pwsh
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
+          ALIYUN_OSS_PUBLIC_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL }}
+        run: |
+          $required = @(
+            'ALIYUN_OSS_ACCESS_KEY_ID',
+            'ALIYUN_OSS_ACCESS_KEY_SECRET',
+            'ALIYUN_OSS_BUCKET',
+            'ALIYUN_OSS_ENDPOINT',
+            'ALIYUN_OSS_PUBLIC_BASE_URL'
+          )
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing GitHub Actions Secret or Variable: $name"
+            }
+          }
+
       - name: Create update manifest
         shell: pwsh
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL }}
         run: |
           $version = node -p "require('./package.json').version"
           $releaseNotes = (Get-Content 'RELEASE_NOTES.md' -Raw).Trim()
@@ -51,6 +77,7 @@ jobs:
           if (-not $installer) { throw 'NSIS installer was not generated.' }
           $signaturePath = "$($installer.FullName).sig"
           if (-not (Test-Path $signaturePath)) { throw 'Updater signature was not generated.' }
+          $downloadUrl = "$($env:ALIYUN_OSS_PUBLIC_BASE_URL.TrimEnd('/'))/releases/${{ github.ref_name }}/$($installer.Name)"
           $manifest = @{
             version = $version
             notes = $releaseNotes
@@ -58,11 +85,39 @@ jobs:
             platforms = @{
               'windows-x86_64' = @{
                 signature = (Get-Content $signaturePath -Raw).Trim()
-                url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$($installer.Name)"
+                url = $downloadUrl
               }
             }
           }
           $manifest | ConvertTo-Json -Depth 5 | Set-Content 'latest.json' -Encoding utf8
+
+      - name: Upload updater files to Alibaba Cloud OSS
+        shell: pwsh
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET }}
+          ALIYUN_OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT }}
+        run: |
+          $ossutil = Join-Path $env:RUNNER_TEMP 'ossutil64.exe'
+          Invoke-WebRequest -Uri 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil64.exe' -OutFile $ossutil
+          & $ossutil config -e $env:ALIYUN_OSS_ENDPOINT -i $env:ALIYUN_OSS_ACCESS_KEY_ID -k $env:ALIYUN_OSS_ACCESS_KEY_SECRET -L CH
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to configure ossutil.' }
+
+          $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' | Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer was not generated.' }
+          $signaturePath = "$($installer.FullName).sig"
+          if (-not (Test-Path $signaturePath)) { throw 'Updater signature was not generated.' }
+
+          $releasePath = "oss://$($env:ALIYUN_OSS_BUCKET)/runvoke/releases/${{ github.ref_name }}"
+          foreach ($asset in @($installer.FullName, $signaturePath)) {
+            $destination = "$releasePath/$([System.IO.Path]::GetFileName($asset))"
+            & $ossutil cp $asset $destination -f
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload $([System.IO.Path]::GetFileName($asset)) to OSS." }
+          }
+
+          & $ossutil cp 'latest.json' "oss://$($env:ALIYUN_OSS_BUCKET)/runvoke/latest.json" -f
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to upload latest.json to OSS.' }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

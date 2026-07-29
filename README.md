@@ -61,7 +61,7 @@ Runvoke 以“项目 - 任务 - 运行实例”为单位管理这些工作：
 
 ### 应用更新
 
-- 使用 GitHub Releases 提供 Windows NSIS 安装包。
+- GitHub Releases 提供 Windows NSIS 安装包的手动下载入口；应用内更新由阿里云 OSS 分发。
 - 启动时和每 30 分钟自动检查更新，也可在设置中立即检查。
 - 更新包通过 Tauri 签名校验后才会下载、安装并重启应用。
 
@@ -146,7 +146,7 @@ src-tauri/target/release/bundle/nsis/
 
 ## 发布流程
 
-项目通过 GitHub Actions 自动构建、签名并发布 GitHub Release。发布工作流位于 [`.github/workflows/release.yml`](.github/workflows/release.yml)，仅在推送 `v*` 标签时执行。
+项目通过 GitHub Actions 自动构建、签名并发布。发布工作流位于 [`.github/workflows/release.yml`](.github/workflows/release.yml)，仅在推送 `v*` 标签时执行；已签名的更新包和更新清单会同步到阿里云 OSS，GitHub Release 保留为手动下载备份。
 
 ### 首次配置签名
 
@@ -160,9 +160,28 @@ pnpm tauri signer generate -w "$env:USERPROFILE\.tauri\runvoke.key"
 
 在 GitHub 仓库中依次打开 `Settings`、`Secrets and variables`、`Actions`，创建名为 `TAURI_SIGNING_PRIVATE_KEY` 的 Secret，并粘贴私钥完整内容。若在另一台电脑发布，应安全地导入同一把私钥；使用不同私钥会导致已安装版本拒绝更新。
 
+### 配置 OSS 分发
+
+在 GitHub Actions 中配置以下 Secret，供发布工作流上传更新产物；仅授予目标 Bucket 的 `PutObject` 和 `GetObject` 最小权限，禁止使用阿里云主账号 AccessKey：
+
+```text
+ALIYUN_OSS_ACCESS_KEY_ID
+ALIYUN_OSS_ACCESS_KEY_SECRET
+```
+
+再配置以下 Repository Variables：
+
+```text
+ALIYUN_OSS_BUCKET=runvoke-updates
+ALIYUN_OSS_ENDPOINT=oss-cn-shanghai.aliyuncs.com
+ALIYUN_OSS_PUBLIC_BASE_URL=https://runvoke-updates.oss-cn-shanghai.aliyuncs.com/runvoke
+```
+
+更新清单 `latest.json` 使用固定公开地址，版本化安装包与 `.sig` 位于 `runvoke/releases/vX.Y.Z/`。发布工作流会先上传安装包和签名，最后上传更新清单；不要在客户端、仓库或日志中保存 AccessKey。
+
 ### 发布一个新版本
 
-1. 将 `package.json` 和 `src-tauri/tauri.conf.json` 的 `version` 同步改为同一版本号，例如 `0.1.7`。
+1. 将 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml` 的版本同步改为同一版本号，例如 `0.1.10`。
 2. 运行类型检查和生产构建。
 3. 提交并推送 `main`。
 4. 创建并推送同版本标签。
@@ -171,25 +190,25 @@ pnpm tauri signer generate -w "$env:USERPROFILE\.tauri\runvoke.key"
 pnpm typecheck
 pnpm build
 
-git add package.json src-tauri/tauri.conf.json
-git commit -m "chore: release v0.1.7"
+git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml RELEASE_NOTES.md
+git commit -m "chore: release v0.1.10"
 git push origin main
 
-git tag -a v0.1.7 -m "Release v0.1.7"
-git push origin v0.1.7
+git tag -a v0.1.10 -m "Release v0.1.10"
+git push origin v0.1.10
 ```
 
 GitHub Actions 会执行以下工作：
 
 1. 校验标签、`package.json` 和 Tauri 配置中的版本是否一致。
 2. 构建 Windows NSIS 安装包并使用 `TAURI_SIGNING_PRIVATE_KEY` 签名。
-3. 生成包含版本、下载链接和签名的 `latest.json`。
-4. 创建 GitHub Release，并上传安装包、`.sig` 和 `latest.json`。
+3. 生成包含版本、OSS 下载链接和签名的 `latest.json`，再先上传版本化安装包和 `.sig`，最后上传更新清单。
+4. 创建 GitHub Release，并上传安装包、`.sig` 和 `latest.json` 作为手动下载备份。
 
 应用的更新端点为：
 
 ```text
-https://github.com/GezelligheidLin/Runvoke/releases/latest/download/latest.json
+https://runvoke-updates.oss-cn-shanghai.aliyuncs.com/runvoke/latest.json
 ```
 
 ## 项目结构

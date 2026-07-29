@@ -115,8 +115,10 @@ type ProjectContextMenu = {
 
 const pendingConfirmation = ref<PendingConfirmation | null>(null)
 const projectContextMenu = ref<ProjectContextMenu | null>(null)
+const projectContextSubmenuOpen = ref(false)
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined
+let projectContextSubmenuCloseTimer: ReturnType<typeof setTimeout> | undefined
 let scrollbarUpdateFrame: number | undefined
 const updateCheckInterval = 30 * 60 * 1_000
 
@@ -356,6 +358,8 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(scrollbarUpdateFrame)
   if (updateCheckTimer)
     clearInterval(updateCheckTimer)
+  if (projectContextSubmenuCloseTimer)
+    clearTimeout(projectContextSubmenuCloseTimer)
 })
 
 function preventNativeContextMenu(event: MouseEvent) {
@@ -454,6 +458,9 @@ function openEditForm() {
 function showProjectContextMenu(event: MouseEvent, project: ProjectConfig) {
   event.preventDefault()
   selectedId.value = project.id
+  projectContextSubmenuOpen.value = false
+  if (projectContextSubmenuCloseTimer)
+    clearTimeout(projectContextSubmenuCloseTimer)
 
   const target = event.currentTarget
   const rect = target instanceof HTMLElement ? target.getBoundingClientRect() : null
@@ -480,7 +487,32 @@ function showProjectContextMenu(event: MouseEvent, project: ProjectConfig) {
 }
 
 function closeProjectContextMenu() {
+  if (projectContextSubmenuCloseTimer)
+    clearTimeout(projectContextSubmenuCloseTimer)
+  projectContextSubmenuOpen.value = false
   projectContextMenu.value = null
+}
+
+function openProjectContextSubmenu() {
+  if (projectContextSubmenuCloseTimer)
+    clearTimeout(projectContextSubmenuCloseTimer)
+  projectContextSubmenuOpen.value = true
+}
+
+function scheduleProjectContextSubmenuClose() {
+  if (projectContextSubmenuCloseTimer)
+    clearTimeout(projectContextSubmenuCloseTimer)
+  projectContextSubmenuCloseTimer = setTimeout(() => {
+    projectContextSubmenuOpen.value = false
+  }, 180)
+}
+
+function toggleProjectContextSubmenu() {
+  if (projectContextSubmenuOpen.value) {
+    projectContextSubmenuOpen.value = false
+    return
+  }
+  openProjectContextSubmenu()
 }
 
 function editProjectFromContextMenu() {
@@ -1359,8 +1391,21 @@ function stateLabel(state?: string) {
             :style="{ top: `${projectContextMenu.top}px`, left: `${projectContextMenu.left}px` }"
           >
             <button ref="contextMenuEditButton" type="button" role="menuitem" @click="editProjectFromContextMenu">编辑</button>
-            <div class="project-context-submenu">
-              <button class="project-context-submenu-trigger" type="button" role="menuitem" aria-haspopup="menu">
+            <div
+              class="project-context-submenu"
+              :class="{ 'is-open': projectContextSubmenuOpen }"
+              @mouseenter="openProjectContextSubmenu"
+              @mouseleave="scheduleProjectContextSubmenuClose"
+              @focusin="openProjectContextSubmenu"
+            >
+              <button
+                class="project-context-submenu-trigger"
+                type="button"
+                role="menuitem"
+                aria-haspopup="menu"
+                :aria-expanded="projectContextSubmenuOpen"
+                @click="toggleProjectContextSubmenu"
+              >
                 <span>分组</span>
                 <i aria-hidden="true">›</i>
               </button>

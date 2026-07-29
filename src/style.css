@@ -448,7 +448,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .project-context-submenu-trigger { display: flex; align-items: center; justify-content: space-between; }
 .project-context-submenu-trigger i { color: var(--subtle); font-family: Georgia, serif; font-size: 18px; font-style: normal; line-height: 1; }
 .project-context-submenu-panel { position: fixed; z-index: 191; display: none; width: 178px; max-height: min(320px, calc(100vh - 24px)); overflow-y: auto; padding: 4px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface); box-shadow: 0 10px 24px rgba(57,48,40,.16); scrollbar-width: thin; }
-.project-context-submenu:hover .project-context-submenu-panel, .project-context-submenu:focus-within .project-context-submenu-panel { display: block; }
+.project-context-submenu:hover .project-context-submenu-panel, .project-context-submenu:focus-within .project-context-submenu-panel, .project-context-submenu.is-open .project-context-submenu-panel { display: block; }
 .project-context-separator { display: block; height: 1px; margin: 4px 6px; background: var(--line); }
 .project-context-menu .project-context-group-option { display: grid; grid-template-columns: 9px minmax(0, 1fr); align-items: center; gap: 8px; }
 .project-context-group-option > i { width: 6px; height: 6px; border-radius: 50%; background: transparent; }
