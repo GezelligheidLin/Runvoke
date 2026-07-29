@@ -7,10 +7,17 @@ export interface ProjectConfig {
   id: string
   name: string
   directory: string
+  groupId: string | null
   command: string
   env: EnvVariable[]
   port: number | null
   tasks: ProjectTask[]
+}
+
+export interface ProjectGroup {
+  id: string
+  name: string
+  collapsed: boolean
 }
 
 export type TaskMode = 'service' | 'once'
@@ -45,5 +52,6 @@ export interface LogEntry {
   stream: LogStream
   message: string
   timestamp: number
+  transient?: boolean
 }
 

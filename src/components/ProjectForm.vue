@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { ProjectConfig, ProjectTask } from '../types'
+import type { ProjectConfig, ProjectGroup, ProjectTask } from '../types'
 
-const { open: isOpen, project } = defineProps<{
+const { open: isOpen, project, groups } = defineProps<{
   open: boolean
   project: ProjectConfig | null
+  groups: ProjectGroup[]
 }>()
 
 const emit = defineEmits<{
@@ -17,13 +18,18 @@ const emit = defineEmits<{
 const form = ref<ProjectConfig>(emptyProject())
 const browseError = ref('')
 const detectedName = ref<{ name: string, source: string } | null>(null)
+const groupMenuOpen = ref(false)
+const groupSelect = useTemplateRef<HTMLElement>('groupSelect')
+const groupSelectTrigger = useTemplateRef<HTMLButtonElement>('groupSelectTrigger')
 const canAddTask = computed(() => form.value.tasks.length < 3)
+const selectedGroupName = computed(() => groups.find(group => group.id === form.value.groupId)?.name ?? '未分组')
 
 function emptyProject(): ProjectConfig {
   return {
     id: '',
     name: '',
     directory: '',
+    groupId: null,
     command: 'pnpm dev',
     env: [],
     port: null,
@@ -45,9 +51,60 @@ watch(
       : emptyProject()
     browseError.value = ''
     detectedName.value = null
+    groupMenuOpen.value = false
   },
   { immediate: true },
 )
+
+onMounted(() => document.addEventListener('pointerdown', closeGroupMenuFromOutside))
+onBeforeUnmount(() => document.removeEventListener('pointerdown', closeGroupMenuFromOutside))
+
+function closeGroupMenuFromOutside(event: PointerEvent) {
+  const target = event.target
+  if (groupMenuOpen.value && target instanceof Node && !groupSelect.value?.contains(target))
+    groupMenuOpen.value = false
+}
+
+function selectGroup(groupId: string | null) {
+  form.value.groupId = groupId
+  groupMenuOpen.value = false
+  void nextTick(() => groupSelectTrigger.value?.focus())
+}
+
+function openGroupMenuFromKeyboard(event: KeyboardEvent) {
+  if (!['ArrowDown', 'ArrowUp'].includes(event.key))
+    return
+  event.preventDefault()
+  groupMenuOpen.value = true
+  void nextTick(() => focusGroupOption(event.key === 'ArrowDown' ? 1 : -1, true))
+}
+
+function handleGroupMenuKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    groupMenuOpen.value = false
+    void nextTick(() => groupSelectTrigger.value?.focus())
+    return
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault()
+    focusGroupOption(event.key === 'ArrowDown' ? 1 : -1)
+  }
+}
+
+function focusGroupOption(direction: 1 | -1, preferSelected = false) {
+  const options = [...(groupSelect.value?.querySelectorAll<HTMLButtonElement>('.group-select-option') ?? [])]
+  if (!options.length)
+    return
+  const activeIndex = preferSelected
+    ? options.findIndex(option => option.getAttribute('aria-selected') === 'true')
+    : options.indexOf(document.activeElement as HTMLButtonElement)
+  const fallbackIndex = direction === 1 ? 0 : options.length - 1
+  const nextIndex = activeIndex < 0
+    ? fallbackIndex
+    : (activeIndex + direction + options.length) % options.length
+  options[nextIndex]?.focus()
+}
 
 async function browseDirectory() {
   browseError.value = ''
@@ -126,6 +183,59 @@ function submit() {
             </label>
 
             <div class="field-grid">
+              <div class="field field-group">
+                <span id="project-group-label">所属分组</span>
+                <div ref="groupSelect" class="group-select" :class="{ open: groupMenuOpen }">
+                  <button
+                    ref="groupSelectTrigger"
+                    class="group-select-trigger"
+                    type="button"
+                    role="combobox"
+                    aria-labelledby="project-group-label project-group-value"
+                    aria-controls="project-group-options"
+                    aria-haspopup="listbox"
+                    :aria-expanded="groupMenuOpen"
+                    @click="groupMenuOpen = !groupMenuOpen"
+                    @keydown="openGroupMenuFromKeyboard"
+                  >
+                    <span id="project-group-value">{{ selectedGroupName }}</span>
+                    <i aria-hidden="true" />
+                  </button>
+                  <Transition name="group-select-menu">
+                    <div
+                      v-if="groupMenuOpen"
+                      id="project-group-options"
+                      class="group-select-menu"
+                      role="listbox"
+                      aria-labelledby="project-group-label"
+                      @keydown="handleGroupMenuKeydown"
+                    >
+                      <button
+                        class="group-select-option"
+                        type="button"
+                        role="option"
+                        :aria-selected="form.groupId === null"
+                        @click="selectGroup(null)"
+                      >
+                        <i :class="{ selected: form.groupId === null }" />
+                        <span>未分组</span>
+                      </button>
+                      <button
+                        v-for="group in groups"
+                        :key="group.id"
+                        class="group-select-option"
+                        type="button"
+                        role="option"
+                        :aria-selected="form.groupId === group.id"
+                        @click="selectGroup(group.id)"
+                      >
+                        <i :class="{ selected: form.groupId === group.id }" />
+                        <span>{{ group.name }}</span>
+                      </button>
+                    </div>
+                  </Transition>
+                </div>
+              </div>
               <label class="field field-port">
                 <span>端口（可选）</span>
                 <input v-model.number="form.port" type="number" min="1" max="65535" placeholder="5173" />

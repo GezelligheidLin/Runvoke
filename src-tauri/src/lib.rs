@@ -2,10 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufReader, Read},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::Mutex,
+    sync::{
+        mpsc::{sync_channel, RecvTimeoutError, SyncSender},
+        Mutex, OnceLock,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -32,6 +35,8 @@ struct ProjectConfig {
     id: String,
     name: String,
     directory: String,
+    #[serde(default)]
+    group_id: Option<String>,
     // Kept for backwards-compatible reads of existing project files.
     command: String,
     #[serde(default)]
@@ -39,6 +44,15 @@ struct ProjectConfig {
     port: Option<u16>,
     #[serde(default)]
     tasks: Vec<ProjectTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectGroup {
+    id: String,
+    name: String,
+    #[serde(default)]
+    collapsed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,12 +65,18 @@ struct ProjectTask {
 }
 
 const MAX_PROJECT_TASKS: usize = 3;
+const LOG_CHANNEL_CAPACITY: usize = 8_192;
+const LOG_BATCH_LIMIT: usize = 256;
+const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(50);
+const LOG_MESSAGE_LIMIT: usize = 16_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct StoreFile {
     #[serde(default)]
     projects: Vec<ProjectConfig>,
+    #[serde(default)]
+    groups: Vec<ProjectGroup>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +101,7 @@ struct LogEvent {
     stream: String,
     message: String,
     timestamp: u64,
+    mode: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -179,6 +200,7 @@ struct AppState {
     processes: Mutex<HashMap<String, ManagedProcess>>,
     runs: Mutex<HashMap<String, RuntimeStatus>>,
     exit_codes: Mutex<HashMap<String, Option<i32>>>,
+    log_sender: OnceLock<SyncSender<LogEvent>>,
 }
 
 fn now_millis() -> u64 {
@@ -411,6 +433,11 @@ fn list_projects(app: AppHandle) -> Result<Vec<ProjectConfig>, String> {
 }
 
 #[tauri::command]
+fn list_project_groups(app: AppHandle) -> Result<Vec<ProjectGroup>, String> {
+    Ok(load_store(&app)?.groups)
+}
+
+#[tauri::command]
 fn save_project(app: AppHandle, mut project: ProjectConfig) -> Result<ProjectConfig, String> {
     project.name = project.name.trim().to_owned();
     project.directory = project.directory.trim().to_owned();
@@ -425,6 +452,13 @@ fn save_project(app: AppHandle, mut project: ProjectConfig) -> Result<ProjectCon
     validate_project(&project)?;
 
     let mut store = load_store(&app)?;
+    if project
+        .group_id
+        .as_ref()
+        .is_some_and(|group_id| !store.groups.iter().any(|group| group.id == *group_id))
+    {
+        return Err("所属分组不存在".into());
+    }
     if project.id.trim().is_empty() {
         project.id = Uuid::new_v4().to_string();
         store.projects.push(project.clone());
@@ -435,6 +469,134 @@ fn save_project(app: AppHandle, mut project: ProjectConfig) -> Result<ProjectCon
     }
     save_store(&app, &store)?;
     Ok(project)
+}
+
+#[tauri::command]
+fn save_project_group(app: AppHandle, mut group: ProjectGroup) -> Result<ProjectGroup, String> {
+    group.name = group.name.trim().to_owned();
+    if group.name.is_empty() {
+        return Err("分组名称不能为空".into());
+    }
+    if group.name.chars().count() > 30 {
+        return Err("分组名称不能超过 30 个字符".into());
+    }
+
+    let mut store = load_store(&app)?;
+    if store
+        .groups
+        .iter()
+        .any(|item| item.id != group.id && item.name.eq_ignore_ascii_case(&group.name))
+    {
+        return Err("已存在同名分组".into());
+    }
+    if group.id.trim().is_empty() {
+        group.id = Uuid::new_v4().to_string();
+        store.groups.push(group.clone());
+    } else if let Some(existing) = store.groups.iter_mut().find(|item| item.id == group.id) {
+        *existing = group.clone();
+    } else {
+        return Err("分组不存在".into());
+    }
+    save_store(&app, &store)?;
+    Ok(group)
+}
+
+#[tauri::command]
+fn set_project_group_collapsed(
+    app: AppHandle,
+    group_id: String,
+    collapsed: bool,
+) -> Result<ProjectGroup, String> {
+    let mut store = load_store(&app)?;
+    let group = store
+        .groups
+        .iter_mut()
+        .find(|group| group.id == group_id)
+        .ok_or_else(|| "分组不存在".to_owned())?;
+    group.collapsed = collapsed;
+    let result = group.clone();
+    save_store(&app, &store)?;
+    Ok(result)
+}
+
+#[tauri::command]
+fn delete_project_group(app: AppHandle, group_id: String) -> Result<(), String> {
+    let mut store = load_store(&app)?;
+    if !store.groups.iter().any(|group| group.id == group_id) {
+        return Err("分组不存在".into());
+    }
+    store.groups.retain(|group| group.id != group_id);
+    for project in &mut store.projects {
+        if project.group_id.as_deref() == Some(group_id.as_str()) {
+            project.group_id = None;
+        }
+    }
+    save_store(&app, &store)
+}
+
+#[tauri::command]
+fn move_project(
+    app: AppHandle,
+    project_id: String,
+    group_id: Option<String>,
+    target_index: usize,
+) -> Result<Vec<ProjectConfig>, String> {
+    let mut store = load_store(&app)?;
+    if group_id
+        .as_ref()
+        .is_some_and(|id| !store.groups.iter().any(|group| group.id == *id))
+    {
+        return Err("目标分组不存在".into());
+    }
+
+    let source_index = store
+        .projects
+        .iter()
+        .position(|project| project.id == project_id)
+        .ok_or_else(|| "项目不存在".to_owned())?;
+    let mut project = store.projects.remove(source_index);
+    project.group_id = group_id.clone();
+    let matching_indices = store
+        .projects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| (item.group_id == group_id).then_some(index))
+        .collect::<Vec<_>>();
+    let insert_index = matching_indices
+        .get(target_index)
+        .copied()
+        .or_else(|| matching_indices.last().map(|index| index + 1))
+        .unwrap_or(store.projects.len());
+    store.projects.insert(insert_index, project);
+    save_store(&app, &store)?;
+    Ok(store.projects)
+}
+
+#[tauri::command]
+fn reorder_projects(app: AppHandle, project_ids: Vec<String>) -> Result<(), String> {
+    let mut store = load_store(&app)?;
+    if project_ids.len() != store.projects.len() {
+        return Err("项目排序数据与当前项目数量不一致".into());
+    }
+
+    let mut positions = HashMap::with_capacity(project_ids.len());
+    for (index, project_id) in project_ids.into_iter().enumerate() {
+        if positions.insert(project_id, index).is_some() {
+            return Err("项目排序数据包含重复项目".into());
+        }
+    }
+    if store
+        .projects
+        .iter()
+        .any(|project| !positions.contains_key(&project.id))
+    {
+        return Err("项目排序数据包含未知项目".into());
+    }
+
+    store
+        .projects
+        .sort_by_key(|project| positions.get(&project.id).copied().unwrap_or(usize::MAX));
+    save_store(&app, &store)
 }
 
 fn delete_project_inner(app: &AppHandle, state: &AppState, project_id: &str) -> Result<(), String> {
@@ -475,16 +637,81 @@ fn emit_log(
     stream: &str,
     message: impl Into<String>,
 ) {
-    let _ = app.emit(
-        "project-log",
-        LogEvent {
-            run_id: run_id.to_owned(),
-            project_id: project_id.to_owned(),
-            stream: stream.to_owned(),
-            message: message.into(),
-            timestamp: now_millis(),
-        },
-    );
+    emit_log_with_mode(app, run_id, project_id, stream, message, "append");
+}
+
+fn emit_log_with_mode(
+    app: &AppHandle,
+    run_id: &str,
+    project_id: &str,
+    stream: &str,
+    message: impl Into<String>,
+    mode: &str,
+) {
+    let event = LogEvent {
+        run_id: run_id.to_owned(),
+        project_id: project_id.to_owned(),
+        stream: stream.to_owned(),
+        message: truncate_log_message(message.into()),
+        timestamp: now_millis(),
+        mode: mode.to_owned(),
+    };
+    if let Some(sender) = app.state::<AppState>().log_sender.get() {
+        // Logging must never block the managed process. If the UI cannot keep up,
+        // dropping old display output is safer than slowing the compiler itself.
+        let _ = sender.try_send(event);
+    } else {
+        let _ = app.emit("project-logs", vec![event]);
+    }
+}
+
+fn truncate_log_message(mut message: String) -> String {
+    if message.len() <= LOG_MESSAGE_LIMIT {
+        return message;
+    }
+    let mut end = LOG_MESSAGE_LIMIT;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message.truncate(end);
+    message.push_str("… [单条日志过长，已截断]");
+    message
+}
+
+fn setup_log_dispatcher(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let (sender, receiver) = sync_channel::<LogEvent>(LOG_CHANNEL_CAPACITY);
+    app.state::<AppState>()
+        .log_sender
+        .set(sender)
+        .map_err(|_| std::io::Error::other("日志分发器已初始化"))?;
+
+    let app_handle = app.handle().clone();
+    thread::spawn(move || {
+        let mut disconnected = false;
+        while !disconnected {
+            let first = match receiver.recv() {
+                Ok(event) => event,
+                Err(_) => break,
+            };
+            let mut batch = Vec::with_capacity(LOG_BATCH_LIMIT);
+            batch.push(first);
+            let deadline = Instant::now() + LOG_BATCH_INTERVAL;
+
+            while batch.len() < LOG_BATCH_LIMIT {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match receiver.recv_timeout(remaining) {
+                    Ok(event) => batch.push(event),
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+            let _ = app_handle.emit("project-logs", batch);
+        }
+    });
+    Ok(())
 }
 
 fn pipe_logs<R: Read + Send + 'static>(
@@ -496,22 +723,52 @@ fn pipe_logs<R: Read + Send + 'static>(
 ) {
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
-        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 8_192];
+        let mut line = Vec::new();
+        let mut last_progress = Vec::new();
+        let mut progress_active = false;
         loop {
-            buffer.clear();
-            match reader.read_until(b'\n', &mut buffer) {
+            match reader.read(&mut chunk) {
                 Ok(0) => break,
-                Ok(_) => {
-                    while matches!(buffer.last(), Some(b'\n' | b'\r')) {
-                        buffer.pop();
+                Ok(length) => {
+                    for &byte in &chunk[..length] {
+                        match byte {
+                            b'\r' => {
+                                if !line.is_empty() {
+                                    last_progress.clone_from(&line);
+                                    emit_log_with_mode(
+                                        &app,
+                                        &run_id,
+                                        &project_id,
+                                        stream,
+                                        String::from_utf8_lossy(&line).into_owned(),
+                                        "progress",
+                                    );
+                                }
+                                line.clear();
+                                progress_active = true;
+                            }
+                            b'\n' => {
+                                let completed = if line.is_empty() && progress_active {
+                                    &last_progress
+                                } else {
+                                    &line
+                                };
+                                emit_log_with_mode(
+                                    &app,
+                                    &run_id,
+                                    &project_id,
+                                    stream,
+                                    String::from_utf8_lossy(completed).into_owned(),
+                                    if progress_active { "finish" } else { "append" },
+                                );
+                                line.clear();
+                                last_progress.clear();
+                                progress_active = false;
+                            }
+                            _ => line.push(byte),
+                        }
                     }
-                    emit_log(
-                        &app,
-                        &run_id,
-                        &project_id,
-                        stream,
-                        String::from_utf8_lossy(&buffer).into_owned(),
-                    );
                 }
                 Err(error) => {
                     emit_log(
@@ -524,6 +781,21 @@ fn pipe_logs<R: Read + Send + 'static>(
                     break;
                 }
             }
+        }
+        if !line.is_empty() || progress_active {
+            let completed = if line.is_empty() {
+                &last_progress
+            } else {
+                &line
+            };
+            emit_log_with_mode(
+                &app,
+                &run_id,
+                &project_id,
+                stream,
+                String::from_utf8_lossy(completed).into_owned(),
+                if progress_active { "finish" } else { "append" },
+            );
         }
     });
 }
@@ -751,6 +1023,14 @@ fn stop_run_inner(
         .get(run_id)
         .cloned()
         .ok_or_else(|| "未找到运行实例".to_owned())?;
+    status.state = "stopping".into();
+    state
+        .runs
+        .lock()
+        .map_err(|_| "进程状态锁已损坏")?
+        .insert(run_id.to_owned(), status.clone());
+    let _ = app.emit("project-status", status.clone());
+
     let process = state
         .processes
         .lock()
@@ -758,6 +1038,14 @@ fn stop_run_inner(
         .remove(run_id);
 
     let Some(mut process) = process else {
+        status.state = "stopped".into();
+        status.pid = None;
+        state
+            .runs
+            .lock()
+            .map_err(|_| "进程状态锁已损坏")?
+            .insert(run_id.to_owned(), status.clone());
+        let _ = app.emit("project-status", status.clone());
         return Ok(status);
     };
 
@@ -1008,6 +1296,40 @@ fn open_in_file_manager(app: AppHandle, directory: String) -> Result<(), String>
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if url.len() > 8_192
+        || url.chars().any(char::is_control)
+        || !(url.starts_with("http://") || url.starts_with("https://"))
+    {
+        return Err("仅允许打开有效的 HTTP 或 HTTPS 链接".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        Command::new("rundll32.exe")
+            .arg("url.dll,FileProtocolHandler")
+            .arg(url)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|error| format!("无法使用默认浏览器打开链接：{error}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    Command::new("open")
+        .arg(url)
+        .spawn()
+        .map_err(|error| format!("无法使用默认浏览器打开链接：{error}"))?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map_err(|error| format!("无法使用默认浏览器打开链接：{error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
     app.autolaunch()
         .is_enabled()
@@ -1097,6 +1419,7 @@ mod tests {
             id: "project-1".into(),
             name: "测试项目".into(),
             directory: ".".into(),
+            group_id: None,
             command: "pnpm dev".into(),
             env: Vec::new(),
             port: None,
@@ -1190,8 +1513,14 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             list_projects,
+            list_project_groups,
             detect_project_name,
             save_project,
+            save_project_group,
+            set_project_group_collapsed,
+            delete_project_group,
+            move_project,
+            reorder_projects,
             delete_project,
             run_task,
             run_temporary_command,
@@ -1201,11 +1530,13 @@ pub fn run() {
             list_runtime_status,
             open_in_vscode,
             open_in_file_manager,
+            open_external_url,
             get_autostart_enabled,
             set_autostart_enabled,
             set_resize_paint_color,
         ])
         .setup(|app| {
+            setup_log_dispatcher(app)?;
             setup_tray(app)?;
             if let Some(window) = app.get_webview_window("main") {
                 window_resize_guard::install(&window, (247, 245, 241))

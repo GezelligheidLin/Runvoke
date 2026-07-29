@@ -1,0 +1,4 @@
+interface:
+  display_name: "Runvoke 发版"
+  short_description: "规范校验、提交并发布 Runvoke 桌面应用版本"
+  default_prompt: "Use $release-runvoke to validate, version, commit, tag, and publish a Runvoke release."

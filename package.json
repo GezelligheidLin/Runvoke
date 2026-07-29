@@ -1,7 +1,7 @@
 {
   "name": "runvoke",
   "private": true,
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,7 +15,8 @@
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-process": "2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "vue": "^3.5.0"
+    "vue": "^3.5.0",
+    "vue-draggable-plus": "0.6.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

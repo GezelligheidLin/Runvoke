@@ -1,16 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
+import { getVersion } from '@tauri-apps/api/app'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater'
 import brandIcon from '../src-tauri/icons/128x128.png'
 import ProjectForm from './components/ProjectForm.vue'
+import ProjectGroupList from './components/ProjectGroupList.vue'
 import { useLauncher } from './composables/useLauncher'
-import type { LogStream, ProjectConfig, ProjectTask, RuntimeStatus } from './types'
+import type { LogStream, ProjectConfig, ProjectGroup, ProjectTask, RuntimeStatus } from './types'
 
 const {
   projects,
+  projectGroups,
   selectedId,
   selectedProject,
   selectedRunId,
@@ -22,6 +25,10 @@ const {
   error,
   autostartEnabled,
   saveProject,
+  saveProjectGroup,
+  removeProjectGroup,
+  setProjectGroupCollapsed,
+  moveProject,
   removeProject,
   runTask,
   runTemporaryCommand,
@@ -39,14 +46,24 @@ const formOpen = ref(false)
 const editingProject = ref<ProjectConfig | null>(null)
 const settingsOpen = ref(false)
 type Theme = 'light' | 'dark'
+type LogLinkAction = 'open' | 'copy'
 const theme = ref<Theme>(readTheme())
+const logLinkAction = ref<LogLinkAction>(readLogLinkAction())
 const saving = ref(false)
 const busyAction = ref('')
 const temporaryCommand = ref('')
 const projectOpenMenuOpen = ref(false)
+const groupEditorOpen = ref(false)
+const groupDraftId = ref('')
+const groupDraftName = ref('')
+const groupDraftProjectId = ref('')
+const groupSaving = ref(false)
+const activeGroupMenuId = ref<string | null>(null)
+const ungroupedCollapsed = ref(readUngroupedCollapsed())
 const logFilter = ref<'all' | LogStream>('all')
 const autoScroll = ref(true)
 const toast = ref<{ type: 'success' | 'error', message: string } | null>(null)
+const appVersion = shallowRef('')
 const availableUpdate = shallowRef<Update | null>(null)
 const updatePopoverOpen = ref(false)
 const updateChecking = ref(false)
@@ -55,6 +72,7 @@ const updateProgress = ref({ received: 0, total: 0 })
 const logContainer = useTemplateRef<HTMLDivElement>('logContainer')
 const runListContainer = useTemplateRef<HTMLDivElement>('runListContainer')
 const projectListContainer = useTemplateRef<HTMLElement>('projectListContainer')
+const groupNameInput = useTemplateRef<HTMLInputElement>('groupNameInput')
 const confirmationCancelButton = useTemplateRef<HTMLButtonElement>('confirmationCancelButton')
 const contextMenuEditButton = useTemplateRef<HTMLButtonElement>('contextMenuEditButton')
 
@@ -88,6 +106,8 @@ type ProjectContextMenu = {
   project: ProjectConfig
   top: number
   left: number
+  submenuTop: number
+  submenuLeft: number
 }
 
 const pendingConfirmation = ref<PendingConfirmation | null>(null)
@@ -103,6 +123,24 @@ function readTheme(): Theme {
   }
   catch {
     return 'light'
+  }
+}
+
+function readUngroupedCollapsed() {
+  try {
+    return window.localStorage.getItem('runvoke-ungrouped-collapsed') === 'true'
+  }
+  catch {
+    return false
+  }
+}
+
+function readLogLinkAction(): LogLinkAction {
+  try {
+    return window.localStorage.getItem('runvoke-log-link-action') === 'copy' ? 'copy' : 'open'
+  }
+  catch {
+    return 'open'
   }
 }
 
@@ -132,6 +170,93 @@ watch(theme, (value) => {
   }
 }, { immediate: true })
 
+watch(ungroupedCollapsed, (value) => {
+  try {
+    window.localStorage.setItem('runvoke-ungrouped-collapsed', String(value))
+  }
+  catch {
+    // Local persistence is optional when storage is unavailable.
+  }
+})
+
+watch(logLinkAction, (value) => {
+  try {
+    window.localStorage.setItem('runvoke-log-link-action', value)
+  }
+  catch {
+    // Link behavior persistence is optional when storage is unavailable.
+  }
+})
+
+type LogSegment = {
+  text: string
+  url?: string
+}
+
+function splitLogMessage(message: string): LogSegment[] {
+  const segments: LogSegment[] = []
+  const pattern = /https?:\/\/[^\s<>"']+/gi
+  let cursor = 0
+  for (const match of message.matchAll(pattern)) {
+    const start = match.index ?? 0
+    const candidate = match[0]
+    const url = candidate.replace(/[),.;!?]+$/g, '')
+    if (start > cursor)
+      segments.push({ text: message.slice(cursor, start) })
+    if (url)
+      segments.push({ text: url, url })
+    if (candidate.length > url.length)
+      segments.push({ text: candidate.slice(url.length) })
+    cursor = start + candidate.length
+  }
+  if (cursor < message.length)
+    segments.push({ text: message.slice(cursor) })
+  return segments.length ? segments : [{ text: message || ' ' }]
+}
+
+async function handleLogLink(url: string) {
+  if (logLinkAction.value === 'copy') {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url)
+      }
+      else {
+        copyTextFallback(url)
+      }
+      notify('success', '链接已复制')
+    }
+    catch {
+      try {
+        copyTextFallback(url)
+        notify('success', '链接已复制')
+      }
+      catch (value) {
+        notify('error', `复制链接失败：${String(value)}`)
+      }
+    }
+    return
+  }
+  try {
+    await invoke('open_external_url', { url })
+  }
+  catch (value) {
+    notify('error', `打开链接失败：${String(value)}`)
+  }
+}
+
+function copyTextFallback(text: string) {
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  const copied = document.execCommand('copy')
+  textarea.remove()
+  if (!copied)
+    throw new Error('系统拒绝了剪贴板操作')
+}
+
 const filteredProjects = computed(() => {
   const keyword = search.value.trim().toLocaleLowerCase()
   if (!keyword)
@@ -139,6 +264,32 @@ const filteredProjects = computed(() => {
   return projects.value.filter((project) =>
     `${project.name} ${project.directory} ${project.command}`.toLocaleLowerCase().includes(keyword),
   )
+})
+type ProjectGroupSection = {
+  id: string | null
+  name: string
+  collapsed: boolean
+  projects: ProjectConfig[]
+}
+
+const projectGroupSections = computed<ProjectGroupSection[]>(() => {
+  const searching = Boolean(search.value.trim())
+  const sections: ProjectGroupSection[] = projectGroups.value.map(group => ({
+    id: group.id,
+    name: group.name,
+    collapsed: searching ? false : group.collapsed,
+    projects: filteredProjects.value.filter(project => project.groupId === group.id),
+  }))
+  const ungroupedProjects = filteredProjects.value.filter(project => !project.groupId)
+  if (ungroupedProjects.length || (!searching && projectGroups.value.length)) {
+    sections.push({
+      id: null,
+      name: '未分组',
+      collapsed: searching ? false : ungroupedCollapsed.value,
+      projects: ungroupedProjects,
+    })
+  }
+  return searching ? sections.filter(section => section.projects.length) : sections
 })
 
 const visibleLogs = computed(() => {
@@ -171,7 +322,14 @@ watch(
 )
 
 watch(
-  () => filteredProjects.value.length,
+  () => projectGroupSections.value.map(section => `${section.id}:${section.collapsed}:${section.projects.length}`).join('|'),
+  () => {
+    void nextTick(updateProjectListScrollbar)
+  },
+)
+
+watch(
+  () => [groupEditorOpen.value, activeGroupMenuId.value] as const,
   () => {
     void nextTick(updateProjectListScrollbar)
   },
@@ -181,6 +339,8 @@ onMounted(() => {
   window.addEventListener('resize', scheduleScrollbarUpdate)
   window.addEventListener('contextmenu', preventNativeContextMenu)
   void nextTick(updateScrollbars)
+  if (isTauri())
+    void getVersion().then(version => appVersion.value = version).catch(() => {})
   void checkForUpdate()
   updateCheckTimer = window.setInterval(() => void checkForUpdate(), updateCheckInterval)
 })
@@ -264,6 +424,7 @@ async function installAvailableUpdate() {
 }
 
 function openCreateForm() {
+  closeGroupEditor()
   editingProject.value = null
   formOpen.value = true
 }
@@ -281,13 +442,22 @@ function showProjectContextMenu(event: MouseEvent, project: ProjectConfig) {
   const rect = target instanceof HTMLElement ? target.getBoundingClientRect() : null
   const anchorX = event.clientX || rect?.left || 12
   const anchorY = event.clientY || rect?.bottom || 12
-  const menuWidth = 128
-  const menuHeight = 42
+  const menuWidth = 144
+  const menuHeight = 76
+  const submenuWidth = 178
+  const submenuHeight = Math.min(320, 84 + projectGroups.value.length * 32)
   const viewportPadding = 12
+  const left = Math.max(viewportPadding, Math.min(anchorX, window.innerWidth - menuWidth - viewportPadding))
+  const top = Math.max(viewportPadding, Math.min(anchorY, window.innerHeight - menuHeight - viewportPadding))
+  const submenuLeft = left + menuWidth + submenuWidth <= window.innerWidth - viewportPadding
+    ? left + menuWidth - 1
+    : left - submenuWidth + 1
   projectContextMenu.value = {
     project,
-    left: Math.min(anchorX, window.innerWidth - menuWidth - viewportPadding),
-    top: Math.min(anchorY, window.innerHeight - menuHeight - viewportPadding),
+    left,
+    top,
+    submenuLeft: Math.max(viewportPadding, submenuLeft),
+    submenuTop: Math.max(viewportPadding, Math.min(top, window.innerHeight - submenuHeight - viewportPadding)),
   }
   void nextTick(() => contextMenuEditButton.value?.focus())
 }
@@ -303,6 +473,138 @@ function editProjectFromContextMenu() {
   closeProjectContextMenu()
   editingProject.value = project
   formOpen.value = true
+}
+
+function selectProject(projectId: string) {
+  selectedId.value = projectId
+  activeGroupMenuId.value = null
+}
+
+function openCreateGroup(projectId = '') {
+  groupDraftId.value = ''
+  groupDraftName.value = ''
+  groupDraftProjectId.value = projectId
+  groupEditorOpen.value = true
+  activeGroupMenuId.value = null
+  void nextTick(() => groupNameInput.value?.focus())
+}
+
+function openRenameGroup(group: ProjectGroup | undefined) {
+  if (!group)
+    return
+  groupDraftId.value = group.id
+  groupDraftName.value = group.name
+  groupDraftProjectId.value = ''
+  groupEditorOpen.value = true
+  activeGroupMenuId.value = null
+  void nextTick(() => groupNameInput.value?.select())
+}
+
+function closeGroupEditor() {
+  groupEditorOpen.value = false
+  groupDraftId.value = ''
+  groupDraftName.value = ''
+  groupDraftProjectId.value = ''
+}
+
+async function handleSaveGroup() {
+  const name = groupDraftName.value.trim()
+  if (!name || groupSaving.value)
+    return
+  groupSaving.value = true
+  try {
+    const creating = !groupDraftId.value
+    const projectId = creating ? groupDraftProjectId.value : ''
+    const existing = projectGroups.value.find(group => group.id === groupDraftId.value)
+    const saved = await saveProjectGroup({ id: groupDraftId.value, name, collapsed: existing?.collapsed ?? false })
+    closeGroupEditor()
+    if (projectId) {
+      try {
+        const targetIndex = projects.value.filter(project => project.groupId === saved.id && project.id !== projectId).length
+        await moveProject(projectId, saved.id, targetIndex)
+      }
+      catch (value) {
+        notify('error', `分组已创建，但移动项目失败：${String(value)}`)
+        return
+      }
+    }
+    notify('success', creating ? (projectId ? '分组已创建，项目已移入' : '分组已创建') : '分组已重命名')
+  }
+  catch (value) {
+    notify('error', String(value))
+  }
+  finally {
+    groupSaving.value = false
+  }
+}
+
+async function toggleProjectGroup(section: ProjectGroupSection) {
+  activeGroupMenuId.value = null
+  if (search.value.trim())
+    return
+  if (!section.id) {
+    ungroupedCollapsed.value = !ungroupedCollapsed.value
+    return
+  }
+  try {
+    await setProjectGroupCollapsed(section.id, !section.collapsed)
+  }
+  catch (value) {
+    notify('error', `保存折叠状态失败：${String(value)}`)
+  }
+}
+
+function createGroupFromContextMenu() {
+  const projectId = projectContextMenu.value?.project.id
+  if (!projectId)
+    return
+  closeProjectContextMenu()
+  openCreateGroup(projectId)
+}
+
+async function moveContextProjectToGroup(groupId: string | null) {
+  const project = projectContextMenu.value?.project
+  if (!project)
+    return
+  closeProjectContextMenu()
+  if (project.groupId === groupId)
+    return
+
+  const targetIndex = projects.value.filter(item => item.id !== project.id && item.groupId === groupId).length
+  const groupName = groupId ? projectGroups.value.find(group => group.id === groupId)?.name : '未分组'
+  await perform(
+    `project-group-${project.id}`,
+    () => moveProject(project.id, groupId, targetIndex),
+    `已移到“${groupName ?? '未分组'}”`,
+  )
+}
+
+async function handleRemoveGroup(group: ProjectGroup | undefined) {
+  if (!group)
+    return
+  activeGroupMenuId.value = null
+  if (!window.confirm(`删除分组“${group.name}”吗？组内项目将移到“未分组”。`))
+    return
+  await perform(`group-delete-${group.id}`, () => removeProjectGroup(group.id), '分组已删除，项目已移到未分组')
+}
+
+async function handleProjectMove(payload: { projectId: string, groupId: string | null, targetIndex: number }) {
+  const visibleProjectIds = new Set(filteredProjects.value.map(project => project.id))
+  const targetProjects = projects.value.filter(project => project.id !== payload.projectId && project.groupId === payload.groupId)
+  const visibleTargets = targetProjects.filter(project => visibleProjectIds.has(project.id))
+  const nextVisibleProject = visibleTargets[payload.targetIndex]
+  const previousVisibleProject = visibleTargets[payload.targetIndex - 1]
+  const targetIndex = nextVisibleProject
+    ? targetProjects.findIndex(project => project.id === nextVisibleProject.id)
+    : previousVisibleProject
+      ? targetProjects.findIndex(project => project.id === previousVisibleProject.id) + 1
+      : targetProjects.length
+  try {
+    await moveProject(payload.projectId, payload.groupId, targetIndex)
+  }
+  catch (value) {
+    notify('error', `保存项目位置失败：${String(value)}`)
+  }
 }
 
 async function handleSave(project: ProjectConfig) {
@@ -479,17 +781,6 @@ function projectState(projectId: string) {
   return Object.values(runsById.value).find((run) => run.projectId === projectId && isRunActive(run.state))?.state ?? 'stopped'
 }
 
-function projectStateLabel(projectId: string) {
-  const state = projectState(projectId)
-  if (state === 'starting')
-    return '启动中'
-  if (state === 'running')
-    return '运行中'
-  if (state === 'stopping')
-    return '停止中'
-  return ''
-}
-
 function taskModeLabel(mode: string) {
   return mode === 'service' ? '常驻' : '一次'
 }
@@ -644,6 +935,16 @@ function stateLabel(state?: string) {
               @click="toggleTheme"
             ><i /></button>
           </div>
+          <div class="settings-row log-link-settings-row">
+            <div>
+              <strong>日志链接</strong>
+              <span>点击链接时执行</span>
+            </div>
+            <div class="settings-choice" role="radiogroup" aria-label="点击日志链接时执行">
+              <button type="button" role="radio" :aria-checked="logLinkAction === 'open'" :class="{ active: logLinkAction === 'open' }" @click="logLinkAction = 'open'">浏览器</button>
+              <button type="button" role="radio" :aria-checked="logLinkAction === 'copy'" :class="{ active: logLinkAction === 'copy' }" @click="logLinkAction = 'copy'">复制</button>
+            </div>
+          </div>
           <div class="settings-row update-settings-row">
             <div>
               <strong>应用更新</strong>
@@ -664,8 +965,18 @@ function stateLabel(state?: string) {
           <span>我的项目</span>
           <b>{{ runningCount ? `${runningCount} 个任务运行中` : '当前没有运行任务' }} · 共 {{ projects.length }} 个项目</b>
         </div>
-        <button class="add-button" type="button" aria-label="添加项目" title="添加项目" @click="openCreateForm">+</button>
+        <div class="fleet-actions">
+          <button class="add-button" type="button" aria-label="添加项目" title="添加项目" @click="openCreateForm">+</button>
+        </div>
       </div>
+
+      <Transition name="settings">
+        <form v-if="groupEditorOpen" class="group-editor" @submit.prevent="handleSaveGroup">
+          <input ref="groupNameInput" v-model="groupDraftName" maxlength="30" :placeholder="groupDraftId ? '重命名分组' : '输入分组名称'" />
+          <button type="submit" :disabled="!groupDraftName.trim() || groupSaving">{{ groupSaving ? '保存中' : '保存' }}</button>
+          <button type="button" aria-label="取消" @click="closeGroupEditor">×</button>
+        </form>
+      </Transition>
 
       <label class="search-box">
         <span aria-hidden="true">搜索</span>
@@ -674,27 +985,65 @@ function stateLabel(state?: string) {
 
       <div class="scroll-fade-wrap project-list-scroll-wrap" @mouseenter="setScrollbarHover(projectListScrollbar, true)" @mouseleave="setScrollbarHover(projectListScrollbar, false)">
         <nav ref="projectListContainer" class="project-list" aria-label="项目列表" @scroll="updateProjectListScrollbar">
-          <button
-            v-for="project in filteredProjects"
-            :key="project.id"
-            class="project-item"
-            :class="{ selected: selectedId === project.id, active: isRunActive(projectState(project.id)) }"
-            type="button"
-            @click="selectedId = project.id"
-            @contextmenu="showProjectContextMenu($event, project)"
-          >
-            <span class="status-beacon" :class="projectState(project.id)"><i /></span>
-            <span class="project-copy">
-              <strong>{{ project.name }}</strong>
-              <small>{{ shortPath(project.directory) }}</small>
-            </span>
-            <span class="project-meta">
-              <span v-if="isRunActive(projectState(project.id))" class="project-state" :class="projectState(project.id)">{{ projectStateLabel(project.id) }}</span>
-              <span v-if="project.port" class="port-tag">:{{ project.port }}</span>
-            </span>
-          </button>
+          <section v-for="section in projectGroupSections" :key="section.id ?? 'ungrouped'" class="project-group-section">
+            <header v-if="section.id || projectGroups.length" class="project-group-heading">
+              <button
+                class="project-group-toggle"
+                type="button"
+                :aria-expanded="!section.collapsed"
+                :title="search.trim() ? '搜索时保持展开' : section.collapsed ? '展开分组' : '收起分组'"
+                @click="toggleProjectGroup(section)"
+              >
+                <i :class="{ collapsed: section.collapsed }" />
+                <strong>{{ section.name }}</strong>
+                <small>{{ section.projects.length }}</small>
+              </button>
+              <button
+                v-if="section.id"
+                class="project-group-more"
+                type="button"
+                aria-label="分组操作"
+                :aria-expanded="activeGroupMenuId === section.id"
+                @click="activeGroupMenuId = activeGroupMenuId === section.id ? null : section.id"
+              >···</button>
+            </header>
+            <div v-if="section.id && activeGroupMenuId === section.id" class="project-group-actions">
+              <button type="button" @click="openRenameGroup(projectGroups.find(group => group.id === section.id))">重命名</button>
+              <button class="danger" type="button" @click="handleRemoveGroup(projectGroups.find(group => group.id === section.id))">删除分组</button>
+            </div>
+            <ProjectGroupList
+              v-if="!section.collapsed"
+              :key="`${section.id ?? 'ungrouped'}:${section.projects.map(project => project.id).join(',')}`"
+              :group-id="section.id"
+              :projects="section.projects"
+              @move="handleProjectMove"
+            >
+              <template #default="{ project }">
+                <button
+                  class="project-item reorderable"
+                  :class="{
+                    selected: selectedId === project.id,
+                    active: isRunActive(projectState(project.id)),
+                  }"
+                  :data-project-id="project.id"
+                  type="button"
+                  @click="selectProject(project.id)"
+                  @contextmenu="showProjectContextMenu($event, project)"
+                >
+                  <span class="status-beacon" :class="projectState(project.id)"><i /></span>
+                  <span class="project-copy">
+                    <strong>{{ project.name }}</strong>
+                    <span class="project-detail-row">
+                      <small>{{ shortPath(project.directory) }}</small>
+                      <span v-if="project.port" class="port-tag">:{{ project.port }}</span>
+                    </span>
+                  </span>
+                </button>
+              </template>
+            </ProjectGroupList>
+          </section>
 
-          <div v-if="!loading && !filteredProjects.length" class="list-empty">
+          <div v-if="!loading && !projectGroupSections.length" class="list-empty">
             <p>{{ projects.length ? '没有匹配的项目' : '还没有接入项目' }}</p>
             <button v-if="!projects.length" type="button" @click="openCreateForm">添加第一个项目</button>
           </div>
@@ -721,6 +1070,7 @@ function stateLabel(state?: string) {
           :disabled="updateInstalling"
           @click="updatePopoverOpen = !updatePopoverOpen"
         ><i />更新</button>
+        <span v-else-if="appVersion" class="version-label">v{{ appVersion }}</span>
         <Transition name="update-popover">
           <section v-if="updatePopoverOpen && availableUpdate" class="update-popover" @keydown.esc="updatePopoverOpen = false">
             <span>发现新版本</span>
@@ -861,7 +1211,10 @@ function stateLabel(state?: string) {
               <div class="scroll-fade-wrap terminal-scroll-wrap" @mouseenter="setScrollbarHover(logScrollbar, true)" @mouseleave="setScrollbarHover(logScrollbar, false)">
                 <div ref="logContainer" class="terminal-output" @scroll="updateLogScrollbar">
                   <div v-if="visibleLogs.length" class="log-lines">
-                    <div v-for="entry in visibleLogs" :key="entry.id" class="log-line" :class="entry.stream"><time>{{ formatTime(entry.timestamp) }}</time><b>{{ entry.stream }}</b><pre>{{ entry.message || ' ' }}</pre></div>
+                    <div v-for="entry in visibleLogs" :key="entry.id" v-memo="[entry.id, logLinkAction]" class="log-line" :class="entry.stream">
+                      <time>{{ formatTime(entry.timestamp) }}</time><b>{{ entry.stream }}</b>
+                      <pre><template v-for="(segment, index) in splitLogMessage(entry.message)" :key="index"><button v-if="segment.url" class="log-link" type="button" :title="logLinkAction === 'open' ? '使用默认浏览器打开' : '复制链接'" @click="handleLogLink(segment.url)">{{ segment.text }}</button><span v-else>{{ segment.text }}</span></template></pre>
+                    </div>
                   </div>
                   <div v-else class="terminal-empty"><p>{{ selectedRun ? '等待任务输出' : '从上方选择一个任务开始' }}</p><small>{{ selectedRun ? '标准输出和错误输出会显示在这里' : '常驻服务和一次性任务可同时运行' }}</small></div>
                 </div>
@@ -911,6 +1264,7 @@ function stateLabel(state?: string) {
     <ProjectForm
       :open="formOpen"
       :project="editingProject"
+      :groups="projectGroups"
       @close="formOpen = false"
       @save="handleSave"
     />
@@ -925,6 +1279,43 @@ function stateLabel(state?: string) {
             :style="{ top: `${projectContextMenu.top}px`, left: `${projectContextMenu.left}px` }"
           >
             <button ref="contextMenuEditButton" type="button" role="menuitem" @click="editProjectFromContextMenu">编辑</button>
+            <div class="project-context-submenu">
+              <button class="project-context-submenu-trigger" type="button" role="menuitem" aria-haspopup="menu">
+                <span>分组</span>
+                <i aria-hidden="true">›</i>
+              </button>
+              <section
+                class="project-context-submenu-panel"
+                role="menu"
+                aria-label="移动到分组"
+                :style="{ top: `${projectContextMenu.submenuTop}px`, left: `${projectContextMenu.submenuLeft}px` }"
+              >
+                <button type="button" role="menuitem" @click="createGroupFromContextMenu">新建组</button>
+                <span class="project-context-separator" />
+                <button
+                  v-for="group in projectGroups"
+                  :key="group.id"
+                  class="project-context-group-option"
+                  type="button"
+                  role="menuitemradio"
+                  :aria-checked="projectContextMenu.project.groupId === group.id"
+                  @click="moveContextProjectToGroup(group.id)"
+                >
+                  <i :class="{ current: projectContextMenu.project.groupId === group.id }" />
+                  <span>{{ group.name }}</span>
+                </button>
+                <button
+                  class="project-context-group-option"
+                  type="button"
+                  role="menuitemradio"
+                  :aria-checked="!projectContextMenu.project.groupId"
+                  @click="moveContextProjectToGroup(null)"
+                >
+                  <i :class="{ current: !projectContextMenu.project.groupId }" />
+                  <span>未分组</span>
+                </button>
+              </section>
+            </div>
           </section>
         </div>
       </Transition>
