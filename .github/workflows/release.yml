@@ -46,13 +46,14 @@ jobs:
         shell: pwsh
         run: |
           $version = node -p "require('./package.json').version"
+          $releaseNotes = (Get-Content 'RELEASE_NOTES.md' -Raw).Trim()
           $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' | Select-Object -First 1
           if (-not $installer) { throw 'NSIS installer was not generated.' }
           $signaturePath = "$($installer.FullName).sig"
           if (-not (Test-Path $signaturePath)) { throw 'Updater signature was not generated.' }
           $manifest = @{
             version = $version
-            notes = "Runvoke $version"
+            notes = $releaseNotes
             pub_date = (Get-Date).ToUniversalTime().ToString('o')
             platforms = @{
               'windows-x86_64' = @{
@@ -66,7 +67,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.exe.sig

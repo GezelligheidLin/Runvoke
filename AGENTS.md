@@ -31,6 +31,7 @@
 - 前端改动至少执行 `pnpm typecheck` 和 `pnpm build`。
 - Rust 改动至少执行 `cargo check --manifest-path src-tauri/Cargo.toml`。
 - 修改更新器或发布工作流时，验证 Tauri 配置、更新器权限、GitHub Actions YAML 和签名环境变量名称。
+- 发布版本时同步更新 `RELEASE_NOTES.md`，并明确说明新增功能、问题修复和体验优化。
 - 提交前说明已完成的验证以及尚未验证的内容。
 
 ## 文档同步

@@ -50,7 +50,7 @@ pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-发布新版本时，使 `package.json` 和 `src-tauri/tauri.conf.json` 的版本保持一致，推送同版本的 `vX.Y.Z` 标签。GitHub Actions 会构建已签名的 NSIS 安装包，发布 Release 和 `latest.json` 更新清单。仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 必须保存更新签名私钥。
+发布新版本时，使 `package.json` 和 `src-tauri/tauri.conf.json` 的版本保持一致，更新 `RELEASE_NOTES.md` 中的新增功能、问题修复和体验优化，并推送同版本的 `vX.Y.Z` 标签。GitHub Actions 会构建已签名的 NSIS 安装包，将 `RELEASE_NOTES.md` 写入 Release 和 `latest.json` 更新清单。仓库 Secret `TAURI_SIGNING_PRIVATE_KEY` 必须保存更新签名私钥。
 
 ## 验收标准
 
@@ -82,3 +82,4 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - 2026-07-29：更新检查调整为每 30 分钟一次，并在设置中提供立即检查入口。
 - 2026-07-29：设置新增可持久化的浅色与深色主题切换。
 - 2026-07-29：应用改为单实例运行，再次启动时激活已有主窗口。
+- 2026-07-29：发布流程使用结构化 Release Notes，并同步到 GitHub Release 与应用更新清单。
