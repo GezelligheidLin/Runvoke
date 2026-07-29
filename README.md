@@ -218,4 +218,4 @@ docs/images/                 README 使用的界面截图
 
 ## License
 
-本项目采用 [MIT License](LICENSE)。你可以自由使用、复制、修改、合并、发布、分发、再授权或销售软件副本，但须保留原始版权声明和许可声明。
+本项目采用 [MIT License](LICENSE)。
