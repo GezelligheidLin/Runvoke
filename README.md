@@ -1,7 +1,7 @@
 # Runvoke
 
 <p align="center">
-  一个用于集中运行、观察和管理本地开发项目的桌面工作台。
+  一个集中运行、观察与管理本地开发项目的 Windows 桌面工作台。
 </p>
 
 <p align="center">
@@ -9,72 +9,68 @@
   <img src="https://img.shields.io/badge/platform-Windows-0078D4" alt="Windows" />
   <img src="https://img.shields.io/badge/desktop-Tauri%202-24C8DB" alt="Tauri 2" />
   <img src="https://img.shields.io/badge/frontend-Vue%203-42B883" alt="Vue 3" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-65A30D" alt="MIT License" /></a>
 </p>
 
-Runvoke 面向同时维护多个本地项目的开发者。它将项目目录、预设命令、临时命令、运行实例和日志放在同一处管理，避免在多个终端窗口之间切换，也无需记住每个项目的启动方式。
+Runvoke 面向同时维护多个本地项目的开发者。它把项目目录、常用命令、临时命令、运行实例和实时日志放进同一个桌面工作台，让前端、后端、构建任务、Mock 服务和工具脚本不再散落在多个终端窗口中。
 
-它不是远程部署平台，也不接管你的项目依赖或构建流程。Runvoke 只在本机启动你定义的命令，并提供清晰的状态、日志和进程控制。
+它只在本机执行你配置的命令，不接管项目依赖、构建与部署流程。远程项目管理、云端同步、团队协作和托管部署不属于当前范围。
 
 ## 界面预览
 
 | 浅色工作区 | 深色工作区 |
 | --- | --- |
-| ![Runvoke 浅色空工作区](docs/images/workspace-empty-light.png) | ![Runvoke 深色空工作区](docs/images/workspace-empty-dark.png) |
+| ![Runvoke 浅色工作区](docs/images/workspace-empty-light.png) | ![Runvoke 深色工作区](docs/images/workspace-empty-dark.png) |
 
-![项目任务、运行实例和实时日志](docs/images/project-runtime.png)
+![项目任务、运行记录与实时日志](docs/images/project-workspace-light.png)
 
-## 为什么使用 Runvoke
+![运行中状态、项目分组与日志观察](docs/images/project-runtime-active.png)
 
-本地开发通常会同时打开前端、后端、构建任务、Mock 服务和工具脚本。它们的命令、端口和输出散落在不同终端中，停止一个任务时也容易误伤其他进程。
+## 核心能力
 
-Runvoke 以“项目 - 任务 - 运行实例”为单位管理这些工作：
+### 管理本地项目
 
-- 一个项目保存目录、端口、环境变量和最多 3 条预设任务。
-- 每次执行生成独立运行实例，因此同一项目的开发服务和构建任务可以并行运行。
-- 每个实例独立记录启动状态、PID、退出码、标准输出、错误输出和系统日志。
-- 停止实例时会回收其完整子进程树，减少残留端口和后台进程。
+- 选择本地项目目录后，自动从 `package.json`、`Cargo.toml`、`pyproject.toml`、`go.mod`、Maven、`.csproj`、`pubspec.yaml`、`composer.json` 等常见清单识别项目名称；已手动填写的名称不会被覆盖。
+- 为项目保存工作目录、端口、环境变量和最多 3 条预设任务。
+- 预设任务可区分为常驻服务和一次任务；另提供不保存的临时命令，适用于临时构建、检查或脚本执行。
+- 通过项目操作菜单使用 VS Code 或系统文件管理器打开项目目录。
 
-## 功能
+### 分组、搜索与导航
 
-### 项目与任务
+- 创建、重命名、折叠和删除本地项目分组；删除分组仅解除项目归属，不会删除项目。
+- 支持项目组内排序、跨组拖拽和项目列表顺序持久化，重启后仍保持你的工作台布局。
+- 搜索可快速过滤项目；项目右键菜单可直接编辑项目或调整其分组。
+- 工作台和设置页均提供可拖拽分栏，侧栏宽度带最小约束并保存在本机。
 
-- 从本地目录添加项目，并在常见项目清单中自动识别名称。
-- 支持 `package.json`、`Cargo.toml`、`pyproject.toml`、`go.mod`、Maven、`.csproj`、`pubspec.yaml` 和 `composer.json` 等项目清单。
-- 每个项目可保存最多 3 条预设任务，区分“常驻服务”和“一次任务”。
-- 支持不保存的临时命令，适合临时构建、检查或脚本执行。
-- 从项目菜单使用 VS Code 或系统文件管理器打开当前目录。
+### 多任务运行与日志
 
-### 运行与日志
-
-- 同时运行同一项目的多个任务，状态互不覆盖。
-- 显示启动中、运行中、停止中、已停止、已完成和失败状态。
-- 实时查看 `stdout`、`stderr` 和系统日志，可筛选输出并保持自动滚动。
-- 可单独停止某次运行；活动实例会先要求确认。
-- 可移除已结束的运行记录及日志，或一次清除所有已结束记录；活动任务不会被移除。
+- 同一项目的开发服务、构建任务或临时命令可并行执行；每次执行都有独立运行实例，状态与日志互不覆盖。
+- 清晰展示启动中、运行中、停止中、已停止、已完成和失败状态，以及 PID、退出码和执行记录。
+- 实时查看 `stdout`、`stderr` 与系统日志，支持日志筛选与自动滚动；日志中的 HTTP/HTTPS 链接可按设置使用默认浏览器打开或复制。
+- 可单独停止某次运行，停止时会回收完整子进程树；也可从项目侧栏停止全部活动任务。
+- 已停止、已完成或失败的记录可单独移除，或经确认后一键清除；活动任务不会被误删。
 
 ### 桌面体验
 
-- 主窗口关闭后驻留系统托盘，可从托盘恢复窗口或退出应用。
-- 支持随系统启动。
-- 支持浅色和深色主题，主题偏好保存在本机。
-- 禁用原生右键菜单，项目右键提供明确的编辑操作。
+- 关闭主窗口后驻留系统托盘，可从托盘恢复窗口或退出应用。
+- 支持随系统启动，并限制为单实例：再次启动会激活已有窗口，不创建重复窗口或托盘图标。
+- 提供浅色与深色主题，主题偏好与分栏宽度均持久化在本机。
+- 左下角默认提供 GitHub 仓库入口，可在设置中隐藏，并通过系统默认浏览器打开仓库。
+- 项目名称、路径、命令与运行记录等发生截断时，悬浮或键盘聚焦可显示完整内容提示。
 
 ### 应用更新
 
-- GitHub Releases 提供 Windows NSIS 安装包的手动下载入口；应用内更新由阿里云 OSS 分发。
-- 启动时和每 30 分钟自动检查更新，也可在设置中立即检查。
-- 更新包通过 Tauri 签名校验后才会下载、安装并重启应用。
+- GitHub Releases 提供 Windows NSIS 安装包的手动下载入口。
+- 应用内更新通过阿里云 OSS 分发已签名的更新包；启动时、之后每 30 分钟以及设置页的“检查更新”按钮均可检测新版本。
+- 发现新版本后会在应用内提示；安装前需确认，Runvoke 会先停止所有活动项目任务，再下载、校验、安装并重启。
 
-## 快速开始
+## 快速使用
 
-### 安装使用
-
-前往 [Releases](https://github.com/GezelligheidLin/Runvoke/releases) 下载最新的 `Runvoke_x.y.z_x64-setup.exe`，完成安装后启动 Runvoke。
-
-1. 点击“添加项目”。
-2. 选择项目目录，等待应用识别名称，或手动填写名称。
-3. 配置预设任务，例如 `pnpm dev`、`cargo run` 或 `python main.py`。
-4. 在项目工作区点击任务卡片启动；运行记录和日志会立即出现。
+1. 从 [Releases](https://github.com/GezelligheidLin/Runvoke/releases) 下载最新的 `Runvoke_x.y.z_x64-setup.exe`，完成安装后启动 Runvoke。
+2. 在工作台点击“添加项目”，先选择项目目录；等待名称自动识别，或自行修改名称。
+3. 添加预设任务，例如 `pnpm dev`、`cargo run` 或 `python main.py`，并选择任务类型。
+4. 在项目工作区启动任务，观察运行记录和实时日志；需要时执行临时命令或停止指定实例。
+5. 使用侧栏的项目分组、搜索、拖拽排序与设置，让工作台贴合自己的开发习惯。
 
 ## 开发环境
 
@@ -96,31 +92,26 @@ rustc --version
 cargo --version
 ```
 
-### 安装依赖
+### 安装与启动
 
 ```powershell
 git clone https://github.com/GezelligheidLin/Runvoke.git
 cd Runvoke
 pnpm install
-```
-
-### 启动桌面开发环境
-
-```powershell
 pnpm tauri dev
 ```
 
-该命令会启动 Vite 前端开发服务器和 Tauri 桌面窗口。默认开发地址为 `http://localhost:1420`；不要只在浏览器中验证桌面能力，因为项目目录选择、进程管理、托盘和更新器依赖 Tauri 容器。
+`pnpm tauri dev` 会启动 Vite 前端开发服务器和 Tauri 桌面窗口。默认开发地址为 `http://localhost:1420`。项目目录选择、进程管理、系统托盘和更新器都依赖 Tauri 容器，应在桌面窗口中验证。
 
-只调试前端界面时可以运行：
+只调试前端界面时可运行：
 
 ```powershell
 pnpm dev
 ```
 
-## 检查与构建
+## 检查与打包
 
-在提交改动前执行：
+提交改动前执行：
 
 ```powershell
 pnpm typecheck
@@ -128,41 +119,35 @@ pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-`pnpm build` 用于验证前端生产构建；它不会生成可分发的桌面安装包。
-
-### 本地打包 Windows 安装包
+`pnpm build` 仅验证前端生产构建，不生成可分发的桌面安装包。构建 Windows NSIS 安装包：
 
 ```powershell
 pnpm tauri build
 ```
 
-构建完成后，NSIS 安装包位于：
+安装包输出目录：
 
 ```text
 src-tauri/target/release/bundle/nsis/
 ```
 
-启用了更新产物时，安装包旁还会生成 `.sig` 签名文件。请勿把私钥或本地签名密钥提交到仓库。
+启用更新产物后，安装包旁还会生成 `.sig` 签名文件。请勿将签名私钥或 AccessKey 提交到仓库。
 
-## 发布流程
+## 发布与应用内更新
 
-项目通过 GitHub Actions 自动构建、签名并发布。发布工作流位于 [`.github/workflows/release.yml`](.github/workflows/release.yml)，仅在推送 `v*` 标签时执行；已签名的更新包和更新清单会同步到阿里云 OSS，GitHub Release 保留为手动下载备份。
+发布工作流位于 [`.github/workflows/release.yml`](.github/workflows/release.yml)。推送 `v*` 标签后，GitHub Actions 会构建并签名 Windows 安装包，将版本化安装包与签名上传至阿里云 OSS，最后更新 `latest.json`；同一份产物也会附在 GitHub Release 中，作为手动下载安装的备份。
 
 ### 首次配置签名
 
-应用内更新必须签名。请在安全的本机位置生成并保存密钥，再将私钥配置为 GitHub Repository Secret `TAURI_SIGNING_PRIVATE_KEY`。公钥已经配置在 `src-tauri/tauri.conf.json`，私钥绝不能提交到仓库、日志或 Issue。
-
-示例命令：
+应用内更新必须使用同一把签名私钥。请在安全的本机位置生成密钥，再将私钥完整内容配置为 GitHub Repository Secret `TAURI_SIGNING_PRIVATE_KEY`。公钥已配置在 `src-tauri/tauri.conf.json`；私钥不得提交到仓库、日志或 Issue。若在另一台电脑发布，请安全导入同一把私钥。
 
 ```powershell
 pnpm tauri signer generate -w "$env:USERPROFILE\.tauri\runvoke.key"
 ```
 
-在 GitHub 仓库中依次打开 `Settings`、`Secrets and variables`、`Actions`，创建名为 `TAURI_SIGNING_PRIVATE_KEY` 的 Secret，并粘贴私钥完整内容。若在另一台电脑发布，应安全地导入同一把私钥；使用不同私钥会导致已安装版本拒绝更新。
-
 ### 配置 OSS 分发
 
-在 GitHub Actions 中配置以下 Secret，供发布工作流上传更新产物；仅授予目标 Bucket 的 `PutObject` 和 `GetObject` 最小权限，禁止使用阿里云主账号 AccessKey：
+在 GitHub 仓库的 `Settings` -> `Secrets and variables` -> `Actions` 中配置以下 Secrets。请使用具有目标 Bucket 最小权限的 RAM 用户凭据，避免使用阿里云主账号 AccessKey：
 
 ```text
 ALIYUN_OSS_ACCESS_KEY_ID
@@ -177,46 +162,37 @@ ALIYUN_OSS_ENDPOINT=oss-cn-shanghai.aliyuncs.com
 ALIYUN_OSS_PUBLIC_BASE_URL=https://runvoke-updates.oss-cn-shanghai.aliyuncs.com/runvoke
 ```
 
-更新清单 `latest.json` 使用固定公开地址，版本化安装包与 `.sig` 位于 `runvoke/releases/vX.Y.Z/`。发布工作流会先上传安装包和签名，最后上传更新清单；不要在客户端、仓库或日志中保存 AccessKey。
+客户端读取的更新清单地址为：
+
+```text
+https://runvoke-updates.oss-cn-shanghai.aliyuncs.com/runvoke/latest.json
+```
 
 ### 发布一个新版本
 
-1. 将 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml` 的版本同步改为同一版本号，例如 `0.1.10`。
-2. 运行类型检查和生产构建。
-3. 提交并推送 `main`。
-4. 创建并推送同版本标签。
+1. 将 `package.json`、`src-tauri/tauri.conf.json` 与 `src-tauri/Cargo.toml` 的版本统一改为同一版本号。
+2. 更新 `RELEASE_NOTES.md`，说明新增功能、修复与体验优化。
+3. 完成检查后提交并推送 `main`，再创建并推送同版本标签。
 
 ```powershell
 pnpm typecheck
 pnpm build
 
 git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml RELEASE_NOTES.md
-git commit -m "chore: release v0.1.10"
+git commit -m "chore: release v0.1.12"
 git push origin main
 
-git tag -a v0.1.10 -m "Release v0.1.10"
-git push origin v0.1.10
+git tag -a v0.1.12 -m "Release v0.1.12"
+git push origin v0.1.12
 ```
 
-GitHub Actions 会执行以下工作：
-
-1. 校验标签、`package.json` 和 Tauri 配置中的版本是否一致。
-2. 构建 Windows NSIS 安装包并使用 `TAURI_SIGNING_PRIVATE_KEY` 签名。
-3. 生成包含版本、OSS 下载链接和签名的 `latest.json`，再先上传版本化安装包和 `.sig`，最后上传更新清单。
-4. 创建 GitHub Release，并上传安装包、`.sig` 和 `latest.json` 作为手动下载备份。
-
-应用的更新端点为：
-
-```text
-https://runvoke-updates.oss-cn-shanghai.aliyuncs.com/runvoke/latest.json
-```
+工作流会校验标签与三个版本文件一致后再发布。先上传版本化安装包及其 `.sig`，最后发布更新清单，避免客户端读取到不完整的新版本。
 
 ## 项目结构
 
 ```text
 src/                         Vue 前端、界面组件、类型与组合式函数
-src/components/              项目配置表单等界面组件
-src/composables/             项目、任务、运行状态和日志逻辑
+src/components/              项目、分组、设置、分栏与 Tooltip 组件
 src-tauri/                   Tauri 配置、Rust 进程管理与桌面能力
 .github/workflows/           GitHub Actions 发布工作流
 docs/images/                 README 使用的界面截图
@@ -230,10 +206,11 @@ docs/images/                 README 使用的界面截图
 - [Vite](https://vite.dev/)
 - [Rust](https://www.rust-lang.org/)
 - [pnpm](https://pnpm.io/)
+- [Reka UI](https://reka-ui.com/) 与 shadcn-vue Tooltip
 
 ## 贡献与反馈
 
-提交 Issue 前，请附上 Runvoke 版本、Windows 版本、复现步骤以及相关日志。涉及进程启动或停止的问题，请说明执行的命令、工作目录和预期行为，但不要提交令牌、密钥或其他敏感环境变量。
+提交 Issue 时请附上 Runvoke 版本、Windows 版本、复现步骤和相关日志。涉及进程启动或停止的问题，请说明执行的命令、工作目录和预期行为，但不要提交令牌、密钥或其他敏感环境变量。
 
 ## License
 

@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
+import OverflowTooltip from './OverflowTooltip.vue'
 import type { ProjectConfig, ProjectGroup, ProjectTask } from '../types'
 
 const { open: isOpen, project, groups } = defineProps<{
@@ -198,7 +199,7 @@ function submit() {
                     @click="groupMenuOpen = !groupMenuOpen"
                     @keydown="openGroupMenuFromKeyboard"
                   >
-                    <span id="project-group-value">{{ selectedGroupName }}</span>
+                    <OverflowTooltip id="project-group-value" :text="selectedGroupName">{{ selectedGroupName }}</OverflowTooltip>
                     <i aria-hidden="true" />
                   </button>
                   <Transition name="group-select-menu">
@@ -218,7 +219,7 @@ function submit() {
                         @click="selectGroup(null)"
                       >
                         <i :class="{ selected: form.groupId === null }" />
-                        <span>未分组</span>
+                        <OverflowTooltip text="未分组">未分组</OverflowTooltip>
                       </button>
                       <button
                         v-for="group in groups"
@@ -230,7 +231,7 @@ function submit() {
                         @click="selectGroup(group.id)"
                       >
                         <i :class="{ selected: form.groupId === group.id }" />
-                        <span>{{ group.name }}</span>
+                        <OverflowTooltip :text="group.name">{{ group.name }}</OverflowTooltip>
                       </button>
                     </div>
                   </Transition>

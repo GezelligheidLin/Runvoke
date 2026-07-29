@@ -150,7 +150,14 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .list-empty button { padding: 0; border: 0; border-bottom: 1px solid var(--accent); color: var(--accent-strong); background: none; cursor: pointer; font-size: 13px; }
 .sidebar-footer { position: relative; display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 0 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .sidebar-footer > span:nth-child(2) { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.overflow-tooltip-trigger { min-width: 0; }
+.app-tooltip-content { z-index: 260; max-width: min(440px, calc(100vw - 24px)); padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: var(--surface); box-shadow: 0 8px 20px rgba(57,48,40,.16); font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; user-select: text; animation: tooltip-in .16s ease; }
+.app-tooltip-arrow { fill: var(--surface); stroke: var(--line); stroke-width: 1px; }
 .tray-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.github-link-button { display: grid; width: 26px; height: 26px; flex: 0 0 auto; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 3px; color: var(--subtle); background: transparent; cursor: pointer; transition: border-color .16s ease, color .16s ease, background .16s ease; }
+.github-link-button svg { width: 14px; height: 14px; fill: currentColor; }
+.github-link-button:hover, .github-link-button:focus-visible { border-color: var(--line-strong); color: var(--ink); background: var(--surface); outline: 0; }
+.github-link-button:active { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-soft); }
 .update-trigger { display: inline-flex; align-items: center; gap: 5px; min-height: 26px; padding: 0 7px; border: 1px solid #b9cdb5; border-radius: 3px; color: var(--accent-strong); background: #f5f9f3; cursor: pointer; font-size: 10px; font-weight: 700; }
 .update-trigger:hover:not(:disabled), .update-trigger[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); }
 .update-trigger i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px rgba(99,126,104,.12); }
@@ -555,6 +562,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 @keyframes pulse { 50% { opacity: .55; } }
 @keyframes loading-pulse { 50% { opacity: .62; transform: scale(.96); } }
 @keyframes console-cursor { 50% { opacity: 0; } }
+@keyframes tooltip-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
 
 @media (max-width: 760px) {
   body { overflow: auto; }

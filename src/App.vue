@@ -6,10 +6,12 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater'
 import brandIcon from '../src-tauri/icons/128x128.png'
+import OverflowTooltip from './components/OverflowTooltip.vue'
 import ProjectForm from './components/ProjectForm.vue'
 import ProjectGroupList from './components/ProjectGroupList.vue'
 import ResizableSplitPane from './components/ResizableSplitPane.vue'
 import SettingsPage from './components/SettingsPage.vue'
+import { TooltipProvider } from './components/ui/tooltip'
 import { useLauncher } from './composables/useLauncher'
 import type { LogStream, ProjectConfig, ProjectGroup, ProjectTask, RuntimeStatus } from './types'
 
@@ -51,6 +53,7 @@ type Theme = 'light' | 'dark'
 type LogLinkAction = 'open' | 'copy'
 const theme = ref<Theme>(readTheme())
 const logLinkAction = ref<LogLinkAction>(readLogLinkAction())
+const githubLinkVisible = ref(readGithubLinkVisible())
 const saving = ref(false)
 const busyAction = ref('')
 const temporaryCommand = ref('')
@@ -116,9 +119,9 @@ type ProjectContextMenu = {
 const pendingConfirmation = ref<PendingConfirmation | null>(null)
 const projectContextMenu = ref<ProjectContextMenu | null>(null)
 const projectContextSubmenuOpen = ref(false)
-let toastTimer: ReturnType<typeof setTimeout> | undefined
-let updateCheckTimer: ReturnType<typeof setInterval> | undefined
-let projectContextSubmenuCloseTimer: ReturnType<typeof setTimeout> | undefined
+let toastTimer: number | undefined
+let updateCheckTimer: number | undefined
+let projectContextSubmenuCloseTimer: number | undefined
 let scrollbarUpdateFrame: number | undefined
 const updateCheckInterval = 30 * 60 * 1_000
 
@@ -146,6 +149,15 @@ function readLogLinkAction(): LogLinkAction {
   }
   catch {
     return 'open'
+  }
+}
+
+function readGithubLinkVisible() {
+  try {
+    return window.localStorage.getItem('runvoke-github-link-visible') !== 'false'
+  }
+  catch {
+    return true
   }
 }
 
@@ -186,6 +198,15 @@ watch(logLinkAction, (value) => {
   }
   catch {
     // Link behavior persistence is optional when storage is unavailable.
+  }
+})
+
+watch(githubLinkVisible, (value) => {
+  try {
+    window.localStorage.setItem('runvoke-github-link-visible', String(value))
+  }
+  catch {
+    // Repository entry visibility is optional when storage is unavailable.
   }
 })
 
@@ -242,6 +263,15 @@ async function handleLogLink(url: string) {
   }
   catch (value) {
     notify('error', `打开链接失败：${String(value)}`)
+  }
+}
+
+async function openRepository() {
+  try {
+    await invoke('open_external_url', { url: 'https://github.com/GezelligheidLin/Runvoke' })
+  }
+  catch (value) {
+    notify('error', `打开 GitHub 仓库失败：${String(value)}`)
   }
 }
 
@@ -370,7 +400,7 @@ function notify(type: 'success' | 'error', message: string) {
   toast.value = { type, message }
   if (toastTimer)
     clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => {
+  toastTimer = window.setTimeout(() => {
     toast.value = null
   }, 3_200)
 }
@@ -502,7 +532,7 @@ function openProjectContextSubmenu() {
 function scheduleProjectContextSubmenuClose() {
   if (projectContextSubmenuCloseTimer)
     clearTimeout(projectContextSubmenuCloseTimer)
-  projectContextSubmenuCloseTimer = setTimeout(() => {
+  projectContextSubmenuCloseTimer = window.setTimeout(() => {
     projectContextSubmenuOpen.value = false
   }, 180)
 }
@@ -1012,6 +1042,7 @@ function stateLabel(state?: string) {
 </script>
 
 <template>
+  <TooltipProvider :delay-duration="420" :skip-delay-duration="180">
   <div class="app-root" :class="{ 'theme-dark': theme === 'dark' }" @contextmenu.prevent>
     <ResizableSplitPane
       class="app-frame"
@@ -1083,7 +1114,7 @@ function stateLabel(state?: string) {
                 @click="toggleProjectGroup(section)"
               >
                 <i :class="{ collapsed: section.collapsed }" />
-                <strong>{{ section.name }}</strong>
+                <OverflowTooltip as="strong" :text="section.name">{{ section.name }}</OverflowTooltip>
                 <small>{{ section.projects.length }}</small>
               </button>
               <button
@@ -1120,9 +1151,9 @@ function stateLabel(state?: string) {
                 >
                   <span class="status-beacon" :class="projectState(project.id)"><i /></span>
                   <span class="project-copy">
-                    <strong>{{ project.name }}</strong>
+                    <OverflowTooltip as="strong" :text="project.name">{{ project.name }}</OverflowTooltip>
                     <span class="project-detail-row">
-                      <small>{{ shortPath(project.directory) }}</small>
+                      <OverflowTooltip as="small" :text="project.directory">{{ shortPath(project.directory) }}</OverflowTooltip>
                       <span v-if="project.port" class="port-tag">:{{ project.port }}</span>
                     </span>
                   </span>
@@ -1149,7 +1180,19 @@ function stateLabel(state?: string) {
 
       <footer class="sidebar-footer">
         <span class="tray-dot" />
-        <span>应用将在系统托盘中保持运行</span>
+        <OverflowTooltip :text="'应用将在系统托盘中保持运行'">应用将在系统托盘中保持运行</OverflowTooltip>
+        <button
+          v-if="githubLinkVisible"
+          class="github-link-button"
+          type="button"
+          aria-label="在默认浏览器中打开 Runvoke GitHub 仓库"
+          title="打开 GitHub 仓库"
+          @click="openRepository"
+        >
+          <svg aria-hidden="true" viewBox="0 0 16 16" focusable="false">
+            <path d="M8 1.1a6.9 6.9 0 0 0-2.18 13.45c.35.06.48-.15.48-.34v-1.2c-1.95.42-2.36-.83-2.36-.83-.32-.81-.79-1.03-.79-1.03-.65-.44.05-.43.05-.43.72.05 1.1.74 1.1.74.64 1.1 1.68.78 2.08.6.06-.46.25-.78.46-.96-1.56-.18-3.2-.78-3.2-3.47 0-.77.27-1.4.73-1.89-.07-.18-.32-.9.07-1.87 0 0 .6-.19 1.96.72A6.7 6.7 0 0 1 8 3.62c.55 0 1.1.07 1.61.22 1.36-.91 1.96-.72 1.96-.72.39.97.14 1.69.07 1.87.46.49.73 1.12.73 1.89 0 2.7-1.65 3.29-3.22 3.46.25.22.48.65.48 1.31v1.94c0 .19.13.4.49.34A6.9 6.9 0 0 0 8 1.1Z" />
+          </svg>
+        </button>
         <button
           v-if="availableUpdate"
           class="update-trigger"
@@ -1163,7 +1206,7 @@ function stateLabel(state?: string) {
           <section v-if="updatePopoverOpen && availableUpdate" class="update-popover" @keydown.esc="updatePopoverOpen = false">
             <span>发现新版本</span>
             <strong>v{{ availableUpdate.version }}</strong>
-            <p>{{ availableUpdate.body || '已准备好下载并安装最新版本。' }}</p>
+            <OverflowTooltip as="p" :text="availableUpdate.body || '已准备好下载并安装最新版本。'">{{ availableUpdate.body || '已准备好下载并安装最新版本。' }}</OverflowTooltip>
             <small v-if="updateInstalling">{{ updateProgressLabel() }}</small>
             <div>
               <button type="button" :disabled="updateInstalling || updateChecking" @click="checkForUpdate(true)">重新检查</button>
@@ -1183,6 +1226,7 @@ function stateLabel(state?: string) {
         :autostart-busy="busyAction === 'autostart'"
         :theme="theme"
         :log-link-action="logLinkAction"
+        :github-link-visible="githubLinkVisible"
         :app-version="appVersion"
         :available-update-version="availableUpdate?.version ?? ''"
         :available-update-body="availableUpdate?.body ?? ''"
@@ -1193,6 +1237,7 @@ function stateLabel(state?: string) {
         @toggle-autostart="toggleAutostart"
         @set-theme="theme = $event"
         @set-log-link-action="logLinkAction = $event"
+        @set-github-link-visible="githubLinkVisible = $event"
         @check-update="checkForUpdate(true)"
         @install-update="requestInstallAvailableUpdate"
       />
@@ -1202,7 +1247,7 @@ function stateLabel(state?: string) {
           <div class="project-title">
             <span class="section-kicker">当前项目</span>
             <h1>{{ selectedProject.name }}</h1>
-            <code>{{ selectedProject.directory }}</code>
+            <OverflowTooltip as="code" :text="selectedProject.directory">{{ selectedProject.directory }}</OverflowTooltip>
           </div>
           <div class="header-actions">
             <span class="project-open-control" :class="{ open: projectOpenMenuOpen }" @focusout="closeProjectOpenMenu" @keydown.esc="projectOpenMenuOpen = false">
@@ -1238,8 +1283,8 @@ function stateLabel(state?: string) {
               >
                 <span class="task-kind">{{ taskModeLabel(task.mode) }}</span>
                 <span class="task-copy">
-                  <strong>{{ task.name }}</strong>
-                  <code>{{ task.command }}</code>
+                  <OverflowTooltip as="strong" :text="task.name">{{ task.name }}</OverflowTooltip>
+                  <OverflowTooltip as="code" :text="task.command">{{ task.command }}</OverflowTooltip>
                   <small v-if="activeRunForTask(task.id)" class="task-running"><i />{{ stateLabel(activeRunForTask(task.id)?.state) }}</small>
                 </span>
                 <span class="task-action" aria-hidden="true" />
@@ -1275,7 +1320,7 @@ function stateLabel(state?: string) {
                       @click="selectedRunId = run.runId"
                     >
                       <i :class="run.state" />
-                      <span><strong>{{ run.taskName }}</strong><small>{{ stateLabel(run.state) }}</small></span>
+                      <span><OverflowTooltip as="strong" :text="run.taskName">{{ run.taskName }}</OverflowTooltip><OverflowTooltip as="small" :text="stateLabel(run.state)">{{ stateLabel(run.state) }}</OverflowTooltip></span>
                       <time>{{ run.exitCode ?? run.pid ?? '—' }}</time>
                     </button>
                     <button
@@ -1362,9 +1407,9 @@ function stateLabel(state?: string) {
           </div>
           <div class="empty-command"><span>$</span> runvoke add <i /></div>
           <div class="empty-queue">
-            <div><span>01</span><b>选择项目目录</b><i>待命</i></div>
-            <div><span>02</span><b>设置启动命令</b><i>待命</i></div>
-            <div><span>03</span><b>进入后台运行</b><i>待命</i></div>
+            <div><span>01</span><OverflowTooltip as="b" text="选择项目目录">选择项目目录</OverflowTooltip><i>待命</i></div>
+            <div><span>02</span><OverflowTooltip as="b" text="设置启动命令">设置启动命令</OverflowTooltip><i>待命</i></div>
+            <div><span>03</span><OverflowTooltip as="b" text="进入后台运行">进入后台运行</OverflowTooltip><i>待命</i></div>
           </div>
           <div class="empty-console-footer"><span>QUEUE</span><b>0 / 3</b></div>
         </div>
@@ -1427,7 +1472,7 @@ function stateLabel(state?: string) {
                   @click="moveContextProjectToGroup(group.id)"
                 >
                   <i :class="{ current: projectContextMenu.project.groupId === group.id }" />
-                  <span>{{ group.name }}</span>
+                  <OverflowTooltip :text="group.name">{{ group.name }}</OverflowTooltip>
                 </button>
                 <button
                   class="project-context-group-option"
@@ -1485,5 +1530,6 @@ function stateLabel(state?: string) {
       <b>初始化失败</b>
       <span>{{ error }}</span>
     </div>
-  </div>
+      </div>
+  </TooltipProvider>
 </template>

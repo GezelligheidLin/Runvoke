@@ -11,6 +11,7 @@ defineProps<{
   autostartBusy: boolean
   theme: Theme
   logLinkAction: LogLinkAction
+  githubLinkVisible: boolean
   appVersion: string
   availableUpdateVersion: string
   availableUpdateBody: string
@@ -24,6 +25,7 @@ const emit = defineEmits<{
   toggleAutostart: []
   setTheme: [theme: Theme]
   setLogLinkAction: [action: LogLinkAction]
+  setGithubLinkVisible: [visible: boolean]
   checkUpdate: []
   installUpdate: [event: MouseEvent]
 }>()
@@ -107,6 +109,22 @@ function navigateTo(section: SettingsSection) {
                 <button type="button" role="radio" :aria-checked="theme === 'light'" :class="{ active: theme === 'light' }" @click="emit('setTheme', 'light')">浅色</button>
                 <button type="button" role="radio" :aria-checked="theme === 'dark'" :class="{ active: theme === 'dark' }" @click="emit('setTheme', 'dark')">深色</button>
               </div>
+            </article>
+
+            <article class="settings-item">
+              <div>
+                <strong>GitHub 仓库入口</strong>
+                <p>在左下角显示 GitHub 图标，点击后使用默认浏览器打开 Runvoke 仓库。</p>
+              </div>
+              <button
+                class="settings-switch"
+                :class="{ active: githubLinkVisible }"
+                type="button"
+                role="switch"
+                :aria-checked="githubLinkVisible"
+                :aria-label="githubLinkVisible ? '隐藏 GitHub 仓库入口' : '显示 GitHub 仓库入口'"
+                @click="emit('setGithubLinkVisible', !githubLinkVisible)"
+              ><i /></button>
             </article>
           </div>
           </section>
