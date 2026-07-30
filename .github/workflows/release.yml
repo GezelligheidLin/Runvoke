@@ -67,6 +67,7 @@ jobs:
           }
 
       - name: Create update manifest
+        if: ${{ !contains(github.ref_name, '-') }}
         shell: pwsh
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: ${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL }}
@@ -119,14 +120,17 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Failed to upload $([System.IO.Path]::GetFileName($asset)) to OSS." }
           }
 
-          & $ossutil cp 'latest.json' "oss://$($env:ALIYUN_OSS_BUCKET)/runvoke/latest.json" -f
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to upload latest.json to OSS.' }
+          $isPreRelease = '${{ contains(github.ref_name, '-') }}' -eq 'true'
+          if (-not $isPreRelease) {
+            & $ossutil cp 'latest.json' "oss://$($env:ALIYUN_OSS_BUCKET)/runvoke/latest.json" -f
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to upload latest.json to OSS.' }
+          }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.exe.sig
-            latest.json

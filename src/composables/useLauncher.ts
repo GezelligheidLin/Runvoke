@@ -136,6 +136,10 @@ export function useLauncher() {
     projectGroups.value = await invoke<ProjectGroup[]>('list_project_groups')
   }
 
+  async function refreshWorkspace() {
+    await Promise.all([refreshProjects(), refreshProjectGroups()])
+  }
+
   async function refreshRuntime() {
     const statuses = await invoke<RuntimeStatus[]>('list_runtime_status')
     runsById.value = Object.fromEntries(statuses.map((status) => [status.runId, status]))
@@ -150,8 +154,7 @@ export function useLauncher() {
         await listen<RuntimeStatus>('project-status', ({ payload }) => updateRun(payload)),
       )
       await Promise.all([
-        refreshProjects(),
-        refreshProjectGroups(),
+        refreshWorkspace(),
         refreshRuntime(),
         invoke<boolean>('get_autostart_enabled').then((enabled) => { autostartEnabled.value = enabled }),
       ])
@@ -321,6 +324,6 @@ export function useLauncher() {
   return {
     projects, projectGroups, selectedId, selectedProject, selectedRunId, selectedRun, selectedLogs, projectRuns, runsById,
     loading, error, autostartEnabled, saveProject, reorderProjects, saveProjectGroup, removeProjectGroup, setProjectGroupCollapsed, moveProject, removeProject, runTask, runTemporaryCommand, stopRun, dismissRun, dismissInactiveRuns,
-    openInVscode, openInFileManager, setAutostart, clearLogs, formatUptime,
+    openInVscode, openInFileManager, setAutostart, clearLogs, formatUptime, refreshWorkspace,
   }
 }

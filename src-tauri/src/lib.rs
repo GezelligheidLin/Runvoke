@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufReader, Read},
     path::{Path, PathBuf},
@@ -20,6 +20,7 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use uuid::Uuid;
 
+mod mcp_server;
 mod window_resize_guard;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +70,7 @@ const LOG_CHANNEL_CAPACITY: usize = 8_192;
 const LOG_BATCH_LIMIT: usize = 256;
 const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(50);
 const LOG_MESSAGE_LIMIT: usize = 16_000;
+const MCP_LOG_HISTORY_LIMIT: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +79,43 @@ struct StoreFile {
     projects: Vec<ProjectConfig>,
     #[serde(default)]
     groups: Vec<ProjectGroup>,
+    #[serde(default)]
+    mcp: McpConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_mcp_port")]
+    port: u16,
+    #[serde(default)]
+    token: String,
+}
+
+const fn default_mcp_port() -> u16 {
+    38_465
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_mcp_port(),
+            token: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerStatus {
+    enabled: bool,
+    running: bool,
+    port: u16,
+    endpoint: String,
+    authorization_token: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,6 +148,15 @@ struct LogEvent {
 struct DetectedProjectName {
     name: String,
     source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedProject {
+    name: String,
+    directory: String,
+    source: String,
+    suggested_command: Option<String>,
 }
 
 struct ManagedProcess {
@@ -200,7 +248,9 @@ struct AppState {
     processes: Mutex<HashMap<String, ManagedProcess>>,
     runs: Mutex<HashMap<String, RuntimeStatus>>,
     exit_codes: Mutex<HashMap<String, Option<i32>>>,
+    logs: Mutex<HashMap<String, Vec<LogEvent>>>,
     log_sender: OnceLock<SyncSender<LogEvent>>,
+    mcp: Mutex<Option<mcp_server::McpServerRuntime>>,
 }
 
 fn now_millis() -> u64 {
@@ -237,6 +287,7 @@ fn save_store(app: &AppHandle, store: &StoreFile) -> Result<(), String> {
 }
 
 fn normalize_project(project: &mut ProjectConfig) {
+    project.directory = display_directory(&project.directory);
     if project.tasks.is_empty() {
         project.tasks.push(ProjectTask {
             id: "default".into(),
@@ -423,11 +474,272 @@ fn detect_project_name(directory: String) -> Result<DetectedProjectName, String>
     })
 }
 
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn display_directory(value: &str) -> String {
+    let directory = value.trim();
+    #[cfg(windows)]
+    {
+        if let Some(unc_path) = directory.strip_prefix("\\\\?\\UNC\\") {
+            return format!("\\\\{unc_path}");
+        }
+        return directory
+            .strip_prefix("\\\\?\\")
+            .unwrap_or(directory)
+            .to_owned();
+    }
+    #[cfg(not(windows))]
+    directory.to_owned()
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = hex_value(*bytes.get(index + 1)?)?;
+            let low = hex_value(*bytes.get(index + 2)?)?;
+            decoded.push(high * 16 + low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn vscode_uri_to_path(value: &str) -> Option<PathBuf> {
+    let uri = value.strip_prefix("file://")?;
+    let decoded = percent_decode(uri)?;
+    #[cfg(windows)]
+    {
+        let path = decoded.strip_prefix('/').unwrap_or(&decoded).replace('/', "\\");
+        return Some(PathBuf::from(path));
+    }
+    #[cfg(not(windows))]
+    Some(PathBuf::from(decoded))
+}
+
+fn editor_storage_paths(editor_names: &[&str]) -> Vec<PathBuf> {
+    let Some(app_data) = std::env::var_os("APPDATA") else {
+        return Vec::new();
+    };
+    editor_names
+        .iter()
+        .map(|name| {
+            PathBuf::from(&app_data)
+                .join(name)
+                .join("User")
+                .join("globalStorage")
+                .join("storage.json")
+        })
+        .collect()
+}
+
+fn workspace_paths_from_storage(storage: &serde_json::Value) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for key in ["workspaces", "folders"] {
+        if let Some(entries) = storage
+            .get("profileAssociations")
+            .and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_object)
+        {
+            for uri in entries.keys() {
+                let Some(path) = vscode_uri_to_path(uri) else {
+                    continue;
+                };
+                if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("code-workspace")) {
+                    let Some(content) = fs::read_to_string(&path).ok() else {
+                        continue;
+                    };
+                    let Ok(workspace) = serde_json::from_str::<serde_json::Value>(&content) else {
+                        continue;
+                    };
+                    if let Some(folders) = workspace.get("folders").and_then(serde_json::Value::as_array) {
+                        for folder in folders {
+                            if let Some(folder_uri) = folder.get("uri").and_then(serde_json::Value::as_str) {
+                                if let Some(folder_path) = vscode_uri_to_path(folder_uri) {
+                                    paths.push(folder_path);
+                                }
+                            } else if let Some(folder_path) = folder.get("path").and_then(serde_json::Value::as_str) {
+                                paths.push(path.parent().unwrap_or(Path::new(".")).join(folder_path));
+                            }
+                        }
+                    }
+                } else {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn suggested_project_command(directory: &Path) -> Option<String> {
+    if let Ok(content) = fs::read_to_string(directory.join("package.json")) {
+        if let Ok(package) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(scripts) = package.get("scripts").and_then(serde_json::Value::as_object) {
+                for name in ["dev", "start", "serve", "watch"] {
+                    if scripts.contains_key(name) {
+                        return Some(format!("pnpm {name}"));
+                    }
+                }
+            }
+        }
+    }
+    if directory.join("Cargo.toml").is_file() {
+        return Some("cargo run".into());
+    }
+    if directory.join("go.mod").is_file() {
+        return Some("go run .".into());
+    }
+    if directory.join("main.py").is_file() {
+        return Some("python main.py".into());
+    }
+    None
+}
+
+fn list_editor_projects(
+    source: &str,
+    storage_paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<Vec<ImportedProject>, String> {
+    let mut paths = Vec::new();
+    for storage_path in storage_paths {
+        let Ok(content) = fs::read_to_string(storage_path) else {
+            continue;
+        };
+        let Ok(storage) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        paths.extend(workspace_paths_from_storage(&storage));
+    }
+
+    let mut seen = HashSet::new();
+    let mut projects = paths
+        .into_iter()
+        .filter_map(|path| {
+            let canonical_directory = path.canonicalize().ok()?;
+            if !canonical_directory.is_dir() {
+                return None;
+            }
+            let key = canonical_directory.to_string_lossy().to_lowercase();
+            if !seen.insert(key) {
+                return None;
+            }
+            let name = canonical_directory.file_name()?.to_string_lossy().into_owned();
+            Some(ImportedProject {
+                name,
+                directory: display_directory(&canonical_directory.to_string_lossy()),
+                source: source.into(),
+                suggested_command: suggested_project_command(&canonical_directory),
+            })
+        })
+        .collect::<Vec<_>>();
+    projects.sort_by_key(|project| project.directory.to_lowercase());
+    Ok(projects)
+}
+
+#[tauri::command]
+fn list_vscode_projects() -> Result<Vec<ImportedProject>, String> {
+    list_editor_projects(
+        "Visual Studio Code",
+        editor_storage_paths(&["Code", "Code - Insiders", "VSCodium"]),
+    )
+}
+
+#[tauri::command]
+fn list_cursor_projects() -> Result<Vec<ImportedProject>, String> {
+    list_editor_projects("Cursor", editor_storage_paths(&["Cursor"]))
+}
+
+fn mcp_server_status(app: &AppHandle, state: &AppState) -> Result<McpServerStatus, String> {
+    let store = load_store(app)?;
+    let running = state
+        .mcp
+        .lock()
+        .map_err(|_| "MCP 服务状态锁已损坏")?
+        .is_some();
+    let port = store.mcp.port;
+    Ok(McpServerStatus {
+        enabled: store.mcp.enabled,
+        running,
+        port,
+        endpoint: format!("http://127.0.0.1:{port}/mcp"),
+        authorization_token: store.mcp.token,
+    })
+}
+
+#[tauri::command]
+fn get_mcp_server_status(app: AppHandle, state: State<'_, AppState>) -> Result<McpServerStatus, String> {
+    mcp_server_status(&app, state.inner())
+}
+
+#[tauri::command]
+async fn set_mcp_server_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<McpServerStatus, String> {
+    if enabled {
+        if state
+            .mcp
+            .lock()
+            .map_err(|_| "MCP 服务状态锁已损坏")?
+            .is_some()
+        {
+            return mcp_server_status(&app, state.inner());
+        }
+
+        let mut store = load_store(&app)?;
+        if store.mcp.token.is_empty() {
+            store.mcp.token = Uuid::new_v4().to_string();
+        }
+        let runtime = mcp_server::start(app.clone(), store.mcp.port, store.mcp.token.clone()).await?;
+        state
+            .mcp
+            .lock()
+            .map_err(|_| "MCP 服务状态锁已损坏")?
+            .replace(runtime);
+        store.mcp.enabled = true;
+        save_store(&app, &store)?;
+    } else {
+        if let Some(runtime) = state
+            .mcp
+            .lock()
+            .map_err(|_| "MCP 服务状态锁已损坏")?
+            .take()
+        {
+            runtime.stop();
+        }
+        let mut store = load_store(&app)?;
+        store.mcp.enabled = false;
+        save_store(&app, &store)?;
+    }
+    let status = mcp_server_status(&app, state.inner())?;
+    let _ = app.emit("mcp-server-status", &status);
+    Ok(status)
+}
+
 #[tauri::command]
 fn list_projects(app: AppHandle) -> Result<Vec<ProjectConfig>, String> {
     let mut store = load_store(&app)?;
+    let mut directories_changed = false;
     for project in &mut store.projects {
+        let previous_directory = project.directory.clone();
         normalize_project(project);
+        directories_changed |= project.directory != previous_directory;
+    }
+    if directories_changed {
+        save_store(&app, &store)?;
     }
     Ok(store.projects)
 }
@@ -656,6 +968,13 @@ fn emit_log_with_mode(
         timestamp: now_millis(),
         mode: mode.to_owned(),
     };
+    if let Ok(mut logs) = app.state::<AppState>().logs.lock() {
+        let history = logs.entry(event.run_id.clone()).or_default();
+        history.push(event.clone());
+        if history.len() > MCP_LOG_HISTORY_LIMIT {
+            history.drain(..history.len() - MCP_LOG_HISTORY_LIMIT);
+        }
+    }
     if let Some(sender) = app.state::<AppState>().log_sender.get() {
         // Logging must never block the managed process. If the UI cannot keep up,
         // dropping old display output is safer than slowing the compiler itself.
@@ -1534,6 +1853,10 @@ pub fn run() {
             list_projects,
             list_project_groups,
             detect_project_name,
+            list_vscode_projects,
+            list_cursor_projects,
+            get_mcp_server_status,
+            set_mcp_server_enabled,
             save_project,
             save_project_group,
             set_project_group_collapsed,
@@ -1558,6 +1881,36 @@ pub fn run() {
         .setup(|app| {
             setup_log_dispatcher(app)?;
             setup_tray(app)?;
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut store = match load_store(&app_handle) {
+                    Ok(store) => store,
+                    Err(_) => return,
+                };
+                if !store.mcp.enabled {
+                    return;
+                }
+                if store.mcp.token.is_empty() {
+                    store.mcp.token = Uuid::new_v4().to_string();
+                    if save_store(&app_handle, &store).is_err() {
+                        return;
+                    }
+                }
+                if let Ok(runtime) = mcp_server::start(
+                    app_handle.clone(),
+                    store.mcp.port,
+                    store.mcp.token.clone(),
+                )
+                .await
+                {
+                    if let Ok(mut mcp) = app_handle.state::<AppState>().mcp.lock() {
+                        mcp.replace(runtime);
+                    }
+                    if let Ok(status) = mcp_server_status(&app_handle, app_handle.state::<AppState>().inner()) {
+                        let _ = app_handle.emit("mcp-server-status", status);
+                    }
+                }
+            });
             if let Some(window) = app.get_webview_window("main") {
                 window_resize_guard::install(&window, (247, 245, 241))
                     .map_err(std::io::Error::other)?;
@@ -1586,6 +1939,11 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
+            if let Ok(mut mcp) = app_handle.state::<AppState>().mcp.lock() {
+                if let Some(runtime) = mcp.take() {
+                    runtime.stop();
+                }
+            }
             stop_all_processes(&app_handle.state::<AppState>());
         }
     });

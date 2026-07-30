@@ -20,6 +20,23 @@ export interface ProjectGroup {
   collapsed: boolean
 }
 
+export interface ImportedProject {
+  name: string
+  directory: string
+  source: string
+  suggestedCommand: string | null
+}
+
+export type ProjectImportSource = 'vscode' | 'cursor'
+
+export interface McpServerStatus {
+  enabled: boolean
+  running: boolean
+  port: number
+  endpoint: string
+  authorizationToken: string
+}
+
 export type TaskMode = 'service' | 'once'
 
 export interface ProjectTask {

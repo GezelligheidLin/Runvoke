@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { invoke, isTauri } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater'
@@ -9,11 +10,14 @@ import brandIcon from '../src-tauri/icons/128x128.png'
 import OverflowTooltip from './components/OverflowTooltip.vue'
 import ProjectForm from './components/ProjectForm.vue'
 import ProjectGroupList from './components/ProjectGroupList.vue'
+import ImportPromptDialog from './components/ImportPromptDialog.vue'
+import AgentProjectImportDialog from './components/AgentProjectImportDialog.vue'
+import ProjectImportDialog from './components/ProjectImportDialog.vue'
 import ResizableSplitPane from './components/ResizableSplitPane.vue'
 import SettingsPage from './components/SettingsPage.vue'
 import { TooltipProvider } from './components/ui/tooltip'
 import { useLauncher } from './composables/useLauncher'
-import type { LogStream, ProjectConfig, ProjectGroup, ProjectTask, RuntimeStatus } from './types'
+import type { ImportedProject, LogStream, McpServerStatus, ProjectConfig, ProjectGroup, ProjectImportSource, ProjectTask, RuntimeStatus } from './types'
 
 const {
   projects,
@@ -43,6 +47,7 @@ const {
   openInFileManager,
   setAutostart,
   clearLogs,
+  refreshWorkspace,
 } = useLauncher()
 
 const search = ref('')
@@ -74,6 +79,17 @@ const updatePopoverOpen = ref(false)
 const updateChecking = ref(false)
 const updateInstalling = ref(false)
 const projectConfigOpening = ref(false)
+const projectImportSource = ref<ProjectImportSource>('vscode')
+const importPromptOpen = ref(false)
+const projectImportDialogOpen = ref(false)
+const projectImportCandidates = ref<ImportedProject[]>([])
+const projectImportLoading = ref(false)
+const projectImporting = ref(false)
+const agentProjectImportDialogOpen = ref(false)
+const agentProjectImportCandidates = ref<ImportedProject[]>([])
+const agentProjectImporting = ref(false)
+const mcpStatus = ref<McpServerStatus | null>(null)
+const mcpBusy = ref(false)
 const updateProgress = ref({ received: 0, total: 0 })
 const logContainer = useTemplateRef<HTMLDivElement>('logContainer')
 const runListContainer = useTemplateRef<HTMLDivElement>('runListContainer')
@@ -122,6 +138,8 @@ const projectContextMenu = ref<ProjectContextMenu | null>(null)
 const projectContextSubmenuOpen = ref(false)
 let toastTimer: number | undefined
 let updateCheckTimer: number | undefined
+let mcpUnlisteners: UnlistenFn[] = []
+let mcpWorkspaceRefreshTimer: number | undefined
 let projectContextSubmenuCloseTimer: number | undefined
 let scrollbarUpdateFrame: number | undefined
 const updateCheckInterval = 30 * 60 * 1_000
@@ -376,8 +394,13 @@ onMounted(() => {
   window.addEventListener('resize', scheduleScrollbarUpdate)
   window.addEventListener('contextmenu', preventNativeContextMenu)
   void nextTick(updateScrollbars)
-  if (isTauri())
-    void getVersion().then(version => appVersion.value = version).catch(() => {})
+  if (isTauri()) {
+    void getVersion().then((version) => {
+      appVersion.value = version
+      promptProjectImportAfterUpdate(version)
+    }).catch(() => {})
+  }
+  void setupMcpBridge()
   void checkForUpdate()
   updateCheckTimer = window.setInterval(() => void checkForUpdate(), updateCheckInterval)
 })
@@ -391,7 +414,119 @@ onBeforeUnmount(() => {
     clearInterval(updateCheckTimer)
   if (projectContextSubmenuCloseTimer)
     clearTimeout(projectContextSubmenuCloseTimer)
+  if (mcpWorkspaceRefreshTimer)
+    clearTimeout(mcpWorkspaceRefreshTimer)
+  for (const unlisten of mcpUnlisteners)
+    unlisten()
+  mcpUnlisteners = []
 })
+
+async function setupMcpBridge() {
+  if (!isTauri())
+    return
+
+  try {
+    mcpUnlisteners = await Promise.all([
+      listen<McpServerStatus>('mcp-server-status', ({ payload }) => {
+        mcpStatus.value = payload
+      }),
+      listen('mcp-workspace-changed', () => {
+        scheduleMcpWorkspaceRefresh()
+      }),
+      listen<{ projects?: unknown }>('mcp-project-import-request', ({ payload }) => {
+        if (!Array.isArray(payload.projects) || !payload.projects.every(isAgentImportCandidate)) {
+          notify('error', 'MCP 导入请求未提供有效的候选项目')
+          return
+        }
+        openAgentProjectImportDialog(payload.projects)
+      }),
+      listen<Record<string, unknown>>('mcp-settings-update', ({ payload }) => {
+        applyMcpSettings(payload)
+      }),
+      listen('mcp-check-updates', () => {
+        void checkForUpdate(true)
+      }),
+      listen('mcp-install-update', () => {
+        requestInstallAvailableUpdateFromMcp()
+      }),
+    ])
+    mcpStatus.value = await invoke<McpServerStatus>('get_mcp_server_status')
+  }
+  catch (value) {
+    notify('error', `MCP 服务状态读取失败：${String(value)}`)
+  }
+}
+
+function scheduleMcpWorkspaceRefresh() {
+  if (mcpWorkspaceRefreshTimer)
+    clearTimeout(mcpWorkspaceRefreshTimer)
+  mcpWorkspaceRefreshTimer = window.setTimeout(() => {
+    mcpWorkspaceRefreshTimer = undefined
+    void refreshWorkspace().catch((value) => {
+      notify('error', `同步 MCP 工作区失败：${String(value)}`)
+    })
+  }, 80)
+}
+
+function applyMcpSettings(payload: Record<string, unknown>) {
+  if (payload.theme === 'light' || payload.theme === 'dark')
+    theme.value = payload.theme
+  if (payload.logLinkAction === 'open' || payload.logLinkAction === 'copy')
+    logLinkAction.value = payload.logLinkAction
+  if (typeof payload.githubLinkVisible === 'boolean')
+    githubLinkVisible.value = payload.githubLinkVisible
+  if (typeof payload.autostartEnabled === 'boolean') {
+    autostartEnabled.value = payload.autostartEnabled
+  }
+  notify('success', 'MCP 设置请求已应用')
+}
+
+async function setMcpServerEnabled(enabled: boolean) {
+  if (mcpBusy.value)
+    return
+  mcpBusy.value = true
+  try {
+    mcpStatus.value = await invoke<McpServerStatus>('set_mcp_server_enabled', { enabled })
+    notify('success', enabled ? '本地 MCP 服务已开启' : '本地 MCP 服务已关闭')
+  }
+  catch (value) {
+    notify('error', `切换 MCP 服务失败：${String(value)}`)
+  }
+  finally {
+    mcpBusy.value = false
+  }
+}
+
+function mcpConfigText() {
+  const status = mcpStatus.value
+  if (!status)
+    return ''
+  return JSON.stringify({
+    mcpServers: {
+      runvoke: {
+        type: 'streamable-http',
+        url: status.endpoint,
+        headers: { Authorization: `Bearer ${status.authorizationToken}` },
+      },
+    },
+  }, null, 2)
+}
+
+async function copyMcpConfig() {
+  const config = mcpConfigText()
+  if (!config)
+    return
+  try {
+    if (navigator.clipboard?.writeText)
+      await navigator.clipboard.writeText(config)
+    else
+      copyTextFallback(config)
+    notify('success', 'MCP 配置已复制')
+  }
+  catch (value) {
+    notify('error', `复制 MCP 配置失败：${String(value)}`)
+  }
+}
 
 function preventNativeContextMenu(event: MouseEvent) {
   event.preventDefault()
@@ -479,6 +614,159 @@ function openSettingsPage() {
   projectOpenMenuOpen.value = false
   updatePopoverOpen.value = false
   settingsOpen.value = true
+}
+
+function promptProjectImportAfterUpdate(version: string) {
+  try {
+    const storageKey = 'runvoke:last-opened-version'
+    const previousVersion = window.localStorage.getItem(storageKey)
+    window.localStorage.setItem(storageKey, version)
+    if (previousVersion && previousVersion !== version)
+      importPromptOpen.value = true
+  }
+  catch {
+    // The import prompt is optional when local storage is unavailable.
+  }
+}
+
+function normalizeDirectory(directory: string) {
+  return directory.replace(/[\\/]+$/, '').toLocaleLowerCase()
+}
+
+async function loadProjectImportCandidates() {
+  if (!isTauri() || projectImportLoading.value)
+    return
+
+  projectImportLoading.value = true
+  try {
+    const command = projectImportSource.value === 'cursor' ? 'list_cursor_projects' : 'list_vscode_projects'
+    const candidates = await invoke<ImportedProject[]>(command)
+    const existingDirectories = new Set(projects.value.map(project => normalizeDirectory(project.directory)))
+    projectImportCandidates.value = candidates.filter(project => !existingDirectories.has(normalizeDirectory(project.directory)))
+  }
+  catch (value) {
+    projectImportCandidates.value = []
+    const sourceLabel = projectImportSource.value === 'cursor' ? 'Cursor' : 'Visual Studio Code'
+    notify('error', `读取 ${sourceLabel} 项目失败：${String(value)}`)
+  }
+  finally {
+    projectImportLoading.value = false
+  }
+}
+
+function openProjectImportDialog() {
+  importPromptOpen.value = false
+  projectImportDialogOpen.value = true
+  void loadProjectImportCandidates()
+}
+
+function openAgentProjectImportDialog(candidates: ImportedProject[]) {
+  const existingDirectories = new Set(projects.value.map(project => normalizeDirectory(project.directory)))
+  agentProjectImportCandidates.value = candidates.filter(project => !existingDirectories.has(normalizeDirectory(project.directory)))
+  agentProjectImportDialogOpen.value = true
+}
+
+function isAgentImportCandidate(candidate: unknown): candidate is ImportedProject {
+  if (!candidate || typeof candidate !== 'object')
+    return false
+  const value = candidate as Partial<ImportedProject>
+  return typeof value.name === 'string'
+    && Boolean(value.name.trim())
+    && typeof value.directory === 'string'
+    && Boolean(value.directory.trim())
+    && (value.suggestedCommand === null || value.suggestedCommand === undefined || typeof value.suggestedCommand === 'string')
+}
+
+async function importProjects(candidates: ImportedProject[]) {
+  if (projectImporting.value || !candidates.length)
+    return
+
+  projectImporting.value = true
+  let imported = 0
+  let failed = 0
+  try {
+    const existingDirectories = new Set(projects.value.map(project => normalizeDirectory(project.directory)))
+    for (const candidate of candidates) {
+      if (existingDirectories.has(normalizeDirectory(candidate.directory)))
+        continue
+
+      const command = candidate.suggestedCommand || 'pnpm dev'
+      const project: ProjectConfig = {
+        id: '',
+        name: candidate.name,
+        directory: candidate.directory,
+        groupId: null,
+        command,
+        env: [],
+        port: null,
+        tasks: [{ id: '', name: '开发服务器', command, mode: 'service' }],
+      }
+      try {
+        await saveProject(project)
+        existingDirectories.add(normalizeDirectory(candidate.directory))
+        imported += 1
+      }
+      catch {
+        failed += 1
+      }
+    }
+    if (imported) {
+      projectImportDialogOpen.value = false
+      notify('success', failed ? `已导入 ${imported} 个项目，${failed} 个项目未能导入` : `已导入 ${imported} 个项目`)
+    }
+    else {
+      notify('error', failed ? '没有项目导入成功，请检查项目目录和配置' : '所选项目已存在')
+    }
+  }
+  finally {
+    projectImporting.value = false
+  }
+}
+
+async function importAgentProjects(candidates: ImportedProject[]) {
+  if (agentProjectImporting.value || !candidates.length)
+    return
+
+  agentProjectImporting.value = true
+  let imported = 0
+  let failed = 0
+  try {
+    const existingDirectories = new Set(projects.value.map(project => normalizeDirectory(project.directory)))
+    for (const candidate of candidates) {
+      if (existingDirectories.has(normalizeDirectory(candidate.directory)))
+        continue
+
+      const command = candidate.suggestedCommand || 'pnpm dev'
+      const project: ProjectConfig = {
+        id: '',
+        name: candidate.name,
+        directory: candidate.directory,
+        groupId: null,
+        command,
+        env: [],
+        port: null,
+        tasks: [{ id: '', name: '开发服务器', command, mode: 'service' }],
+      }
+      try {
+        await saveProject(project)
+        existingDirectories.add(normalizeDirectory(candidate.directory))
+        imported += 1
+      }
+      catch {
+        failed += 1
+      }
+    }
+    if (imported) {
+      agentProjectImportDialogOpen.value = false
+      notify('success', failed ? `已按确认纳入 ${imported} 个项目，${failed} 个项目未能纳入` : `已按确认纳入 ${imported} 个项目`)
+    }
+    else {
+      notify('error', failed ? '没有项目纳入成功，请检查项目目录和配置' : '所选项目已存在')
+    }
+  }
+  finally {
+    agentProjectImporting.value = false
+  }
 }
 
 async function openProjectConfigDirectory() {
@@ -752,11 +1040,40 @@ async function perform(label: string, action: () => Promise<unknown>, success: s
   }
 }
 
-async function handleDelete() {
+function handleDelete(event: MouseEvent) {
   const project = selectedProject.value
-  if (!project || !window.confirm(`确定删除“${project.name}”吗？运行中的进程也会被停止。`))
+  if (!project)
     return
-  await perform('delete', () => removeProject(project.id), '项目已删除')
+  requestConfirmation(
+    event,
+    `确定删除“${project.name}”吗？运行中的进程也会被停止。`,
+    '确认删除',
+    () => perform('delete', () => removeProject(project.id), '项目已删除'),
+  )
+}
+
+function requestInstallAvailableUpdateFromMcp() {
+  if (!availableUpdate.value) {
+    notify('error', '当前没有可安装的更新，请先检查更新')
+    return
+  }
+  if (busyAction.value) {
+    notify('error', '请等待当前操作完成后再安装更新')
+    return
+  }
+  const count = runningCount.value
+  const width = Math.min(280, window.innerWidth - 24)
+  const right = window.innerWidth - 24
+  requestConfirmationAt(
+    { top: window.innerHeight - 68, bottom: window.innerHeight - 34, left: right - 132, right },
+    count
+      ? `安装更新前将停止所有项目当前运行的 ${count} 个任务，并在安装完成后重启 Runvoke。是否继续？`
+      : '安装更新后将重启 Runvoke。当前没有运行中的任务，是否继续？',
+    count ? '停止全部并更新' : '确认更新',
+    installAvailableUpdate,
+    'primary',
+    width,
+  )
 }
 
 function updateScrollbar(container: HTMLElement | null, scrollbar: ScrollbarState) {
@@ -865,8 +1182,19 @@ function requestConfirmation(
     return
 
   const rect = target.getBoundingClientRect()
+  requestConfirmationAt(rect, message, confirmLabel, action, variant)
+}
+
+function requestConfirmationAt(
+  rect: Pick<DOMRect, 'top' | 'bottom' | 'left' | 'right'>,
+  message: string,
+  confirmLabel: string,
+  action: () => Promise<void>,
+  variant: PendingConfirmation['variant'] = 'danger',
+  requestedWidth?: number,
+) {
   const viewportPadding = 12
-  const popoverWidth = Math.min(280, window.innerWidth - viewportPadding * 2)
+  const popoverWidth = requestedWidth ?? Math.min(280, window.innerWidth - viewportPadding * 2)
   const estimatedHeight = 142
   const offset = 8
   const below = rect.bottom + offset
@@ -1252,6 +1580,11 @@ function stateLabel(state?: string) {
         :update-installing="updateInstalling"
         :update-progress-label="updateProgressLabel()"
         :project-config-opening="projectConfigOpening"
+        :project-import-source="projectImportSource"
+        :project-import-busy="projectImportLoading || projectImporting"
+        :mcp-status="mcpStatus"
+        :mcp-busy="mcpBusy"
+        :mcp-config-text="mcpConfigText()"
         @close="settingsOpen = false"
         @toggle-autostart="toggleAutostart"
         @set-theme="theme = $event"
@@ -1260,6 +1593,10 @@ function stateLabel(state?: string) {
         @check-update="checkForUpdate(true)"
         @install-update="requestInstallAvailableUpdate"
         @open-project-config-directory="openProjectConfigDirectory"
+        @set-project-import-source="projectImportSource = $event"
+        @open-project-import="openProjectImportDialog"
+        @set-mcp-enabled="setMcpServerEnabled"
+        @copy-mcp-config="copyMcpConfig"
       />
 
       <template v-else-if="selectedProject">
@@ -1278,7 +1615,7 @@ function stateLabel(state?: string) {
               </span>
             </span>
             <button type="button" @click="openEditForm">编辑</button>
-            <button class="danger-link" type="button" @click="handleDelete">删除</button>
+            <button class="danger-link" type="button" @click="handleDelete($event)">删除</button>
           </div>
         </header>
 
@@ -1444,6 +1781,32 @@ function stateLabel(state?: string) {
       :groups="projectGroups"
       @close="formOpen = false"
       @save="handleSave"
+    />
+
+    <ImportPromptDialog
+      :open="importPromptOpen"
+      :version="appVersion"
+      @close="importPromptOpen = false"
+      @import="openProjectImportDialog"
+    />
+
+    <ProjectImportDialog
+      :open="projectImportDialogOpen"
+      :candidates="projectImportCandidates"
+      :loading="projectImportLoading"
+      :importing="projectImporting"
+      :source="projectImportSource"
+      @close="projectImportDialogOpen = false"
+      @reload="loadProjectImportCandidates"
+      @import="importProjects"
+    />
+
+    <AgentProjectImportDialog
+      :open="agentProjectImportDialogOpen"
+      :candidates="agentProjectImportCandidates"
+      :importing="agentProjectImporting"
+      @close="agentProjectImportDialogOpen = false"
+      @import="importAgentProjects"
     />
 
     <Teleport to="body">

@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, useTemplateRef } from 'vue'
+import CursorIcon from './CursorIcon.vue'
 import ResizableSplitPane from './ResizableSplitPane.vue'
+import vscodeIcon from '../assets/vscode.svg'
+import type { McpServerStatus, ProjectImportSource } from '../types'
 
 type Theme = 'light' | 'dark'
 type LogLinkAction = 'open' | 'copy'
-type SettingsSection = 'general' | 'behavior' | 'updates' | 'project-config'
+type SettingsSection = 'general' | 'behavior' | 'updates' | 'project-config' | 'mcp'
 
 defineProps<{
   autostartEnabled: boolean
@@ -19,6 +22,11 @@ defineProps<{
   updateInstalling: boolean
   updateProgressLabel: string
   projectConfigOpening: boolean
+  projectImportSource: ProjectImportSource
+  projectImportBusy: boolean
+  mcpStatus: McpServerStatus | null
+  mcpBusy: boolean
+  mcpConfigText: string
 }>()
 
 const emit = defineEmits<{
@@ -30,13 +38,80 @@ const emit = defineEmits<{
   checkUpdate: []
   installUpdate: [event: MouseEvent]
   openProjectConfigDirectory: []
+  setProjectImportSource: [source: ProjectImportSource]
+  openProjectImport: []
+  setMcpEnabled: [enabled: boolean]
+  copyMcpConfig: []
 }>()
 
 const activeSection = ref<SettingsSection>('general')
+const projectImportMenuOpen = ref(false)
+const projectImportSelect = useTemplateRef<HTMLElement>('projectImportSelect')
+const projectImportTrigger = useTemplateRef<HTMLButtonElement>('projectImportTrigger')
+const projectImportMenu = useTemplateRef<HTMLElement>('projectImportMenu')
+const projectImportMenuPosition = ref({ top: 0, left: 0, width: 208 })
 
 function navigateTo(section: SettingsSection) {
   activeSection.value = section
 }
+
+function selectProjectImportSource(source: ProjectImportSource) {
+  projectImportMenuOpen.value = false
+  emit('setProjectImportSource', source)
+}
+
+function updateProjectImportMenuPosition() {
+  const rect = projectImportTrigger.value?.getBoundingClientRect()
+  if (!rect)
+    return
+  projectImportMenuPosition.value = {
+    top: rect.bottom + 6,
+    left: rect.left,
+    width: rect.width,
+  }
+}
+
+function openProjectImportMenu() {
+  updateProjectImportMenuPosition()
+  projectImportMenuOpen.value = true
+}
+
+function toggleProjectImportMenu() {
+  if (projectImportMenuOpen.value) {
+    projectImportMenuOpen.value = false
+    return
+  }
+  openProjectImportMenu()
+}
+
+function handleProjectImportTriggerKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    projectImportMenuOpen.value = false
+    return
+  }
+  if (['Enter', ' ', 'ArrowDown'].includes(event.key)) {
+    event.preventDefault()
+    openProjectImportMenu()
+  }
+}
+
+function closeProjectImportMenuFromOutside(event: PointerEvent) {
+  const target = event.target
+  if (target instanceof Node && !projectImportSelect.value?.contains(target) && !projectImportMenu.value?.contains(target))
+    projectImportMenuOpen.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', closeProjectImportMenuFromOutside)
+  window.addEventListener('resize', updateProjectImportMenuPosition)
+  window.addEventListener('scroll', updateProjectImportMenuPosition, true)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', closeProjectImportMenuFromOutside)
+  window.removeEventListener('resize', updateProjectImportMenuPosition)
+  window.removeEventListener('scroll', updateProjectImportMenuPosition, true)
+})
 </script>
 
 <template>
@@ -76,6 +151,10 @@ function navigateTo(section: SettingsSection) {
         <button type="button" :class="{ active: activeSection === 'project-config' }" :aria-current="activeSection === 'project-config' ? 'page' : undefined" @click="navigateTo('project-config')">
           <b>04</b>
           <span>项目配置</span>
+        </button>
+        <button type="button" :class="{ active: activeSection === 'mcp' }" :aria-current="activeSection === 'mcp' ? 'page' : undefined" @click="navigateTo('mcp')">
+          <b>05</b>
+          <span>本地 MCP</span>
         </button>
         <footer class="settings-navigation-footer">
           <span>Runvoke</span>
@@ -179,7 +258,7 @@ function navigateTo(section: SettingsSection) {
           </div>
           </section>
 
-          <section v-else class="settings-section">
+          <section v-else-if="activeSection === 'project-config'" class="settings-section">
           <div class="settings-list">
             <article class="settings-item">
               <div>
@@ -190,11 +269,124 @@ function navigateTo(section: SettingsSection) {
                 {{ projectConfigOpening ? '正在打开' : '打开配置目录' }}
               </button>
             </article>
+            <article class="settings-item settings-import-item">
+              <div>
+                <strong>从其他软件导入</strong>
+                <p>读取已安装软件的本机项目记录，选择后批量导入。导入不会自动执行项目命令。</p>
+              </div>
+              <div class="settings-import-control">
+                <div ref="projectImportSelect" class="group-select settings-source-select" :class="{ open: projectImportMenuOpen }">
+                  <button
+                    ref="projectImportTrigger"
+                    class="group-select-trigger"
+                    type="button"
+                    role="combobox"
+                    aria-label="选择项目导入来源"
+                    aria-controls="project-import-source-options"
+                    :aria-expanded="projectImportMenuOpen"
+                    :disabled="projectImportBusy"
+                    @click="toggleProjectImportMenu"
+                    @keydown="handleProjectImportTriggerKeydown"
+                  >
+                    <span class="settings-source-label">
+                      <img v-if="projectImportSource === 'vscode'" :src="vscodeIcon" alt="" aria-hidden="true">
+                      <CursorIcon v-else />
+                      <span>{{ projectImportSource === 'vscode' ? 'Visual Studio Code' : 'Cursor' }}</span>
+                    </span>
+                    <i aria-hidden="true" />
+                  </button>
+                </div>
+                <button class="settings-secondary-button" type="button" :disabled="projectImportBusy" @click="emit('openProjectImport')">
+                  {{ projectImportBusy ? '正在读取' : '导入项目' }}
+                </button>
+              </div>
+            </article>
+          </div>
+          </section>
+
+          <section v-else class="settings-section settings-mcp-section">
+          <div class="settings-list">
+            <article class="settings-item settings-mcp-toggle">
+              <div>
+                <strong>本地 MCP 服务</strong>
+                <p>仅监听本机 127.0.0.1，供本机 Agent 读取项目、日志并执行受控操作。导入和更新始终需要你在 Runvoke 窗口中确认。</p>
+              </div>
+              <button
+                class="settings-switch"
+                :class="{ active: mcpStatus?.enabled }"
+                type="button"
+                role="switch"
+                :aria-checked="Boolean(mcpStatus?.enabled)"
+                :aria-label="mcpStatus?.enabled ? '关闭本地 MCP 服务' : '开启本地 MCP 服务'"
+                :disabled="mcpBusy || !mcpStatus"
+                @click="emit('setMcpEnabled', !mcpStatus?.enabled)"
+              ><i /></button>
+            </article>
+            <article v-if="mcpStatus?.enabled" class="settings-mcp-details">
+              <div class="settings-mcp-status-row">
+                <div>
+                  <strong>{{ mcpStatus.running ? '服务运行中' : '服务未运行' }}</strong>
+                  <p>关闭此开关会立即停止本地 MCP 端点。</p>
+                </div>
+                <span class="settings-mcp-status" :class="{ online: mcpStatus.running }"><i />{{ mcpStatus.running ? '已连接' : '未连接' }}</span>
+              </div>
+              <dl class="settings-mcp-meta">
+                <div><dt>监听地址</dt><dd><code>127.0.0.1</code></dd></div>
+                <div><dt>端口</dt><dd><code>{{ mcpStatus.port }}</code></dd></div>
+                <div><dt>MCP 端点</dt><dd><code>{{ mcpStatus.endpoint }}</code></dd></div>
+                <div><dt>认证令牌</dt><dd><code>{{ mcpStatus.authorizationToken }}</code></dd></div>
+              </dl>
+              <div class="settings-mcp-config">
+                <div class="settings-mcp-config-heading">
+                  <div><strong>客户端配置</strong><p>复制到支持 Streamable HTTP 的 Agent 配置中。</p></div>
+                  <button class="settings-secondary-button" type="button" @click="emit('copyMcpConfig')">复制配置</button>
+                </div>
+                <pre>{{ mcpConfigText }}</pre>
+              </div>
+            </article>
+            <article v-else class="settings-mcp-offline">
+              <strong>MCP 服务当前关闭</strong>
+              <p>开启后会生成本机认证令牌，并显示可复制的连接配置。</p>
+              <dl v-if="mcpStatus" class="settings-mcp-meta">
+                <div><dt>监听地址</dt><dd><code>127.0.0.1</code></dd></div>
+                <div><dt>端口</dt><dd><code>{{ mcpStatus.port }}</code></dd></div>
+                <div><dt>MCP 端点</dt><dd><code>{{ mcpStatus.endpoint }}</code></dd></div>
+              </dl>
+            </article>
           </div>
           </section>
           </div>
         </div>
       </template>
     </ResizableSplitPane>
+
+    <Teleport to="body">
+      <Transition name="group-select-menu">
+        <div
+          v-if="projectImportMenuOpen"
+          id="project-import-source-options"
+          ref="projectImportMenu"
+          class="group-select-menu settings-source-menu"
+          role="listbox"
+          aria-label="项目导入来源"
+          :style="{ top: `${projectImportMenuPosition.top}px`, left: `${projectImportMenuPosition.left}px`, width: `${projectImportMenuPosition.width}px` }"
+        >
+          <button class="group-select-option" type="button" role="option" :aria-selected="projectImportSource === 'vscode'" @click="selectProjectImportSource('vscode')">
+            <i :class="{ selected: projectImportSource === 'vscode' }" />
+            <span class="settings-source-label">
+              <img :src="vscodeIcon" alt="" aria-hidden="true">
+              <span>Visual Studio Code</span>
+            </span>
+          </button>
+          <button class="group-select-option" type="button" role="option" :aria-selected="projectImportSource === 'cursor'" @click="selectProjectImportSource('cursor')">
+            <i :class="{ selected: projectImportSource === 'cursor' }" />
+            <span class="settings-source-label">
+              <CursorIcon />
+              <span>Cursor</span>
+            </span>
+          </button>
+        </div>
+      </Transition>
+    </Teleport>
   </section>
 </template>
