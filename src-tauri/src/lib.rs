@@ -1270,29 +1270,48 @@ fn open_in_file_manager(app: AppHandle, directory: String) -> Result<(), String>
         return Err("项目目录不存在".into());
     }
 
+    open_directory_in_file_manager(Path::new(&directory))?;
+    emit_log(&app, "app", "app", "system", "已请求文件管理器打开项目");
+    Ok(())
+}
+
+fn open_directory_in_file_manager(directory: &Path) -> Result<(), String> {
+    if !directory.is_dir() {
+        return Err("目录不存在".into());
+    }
+
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         Command::new("explorer.exe")
-            .arg(&directory)
+            .arg(directory)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|error| format!("无法打开文件管理器：{error}"))?;
     }
     #[cfg(target_os = "macos")]
     Command::new("open")
-        .arg(&directory)
+        .arg(directory)
         .spawn()
         .map_err(|error| format!("无法打开文件管理器：{error}"))?;
     #[cfg(all(unix, not(target_os = "macos")))]
     Command::new("xdg-open")
-        .arg(&directory)
+        .arg(directory)
         .spawn()
         .map_err(|error| format!("无法打开文件管理器：{error}"))?;
 
-    emit_log(&app, "app", "app", "system", "已请求文件管理器打开项目");
     Ok(())
+}
+
+#[tauri::command]
+fn open_project_config_directory(app: AppHandle) -> Result<(), String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("无法定位项目配置目录：{error}"))?;
+    fs::create_dir_all(&directory).map_err(|error| format!("无法创建项目配置目录：{error}"))?;
+    open_directory_in_file_manager(&directory)
 }
 
 #[tauri::command]
@@ -1530,6 +1549,7 @@ pub fn run() {
             list_runtime_status,
             open_in_vscode,
             open_in_file_manager,
+            open_project_config_directory,
             open_external_url,
             get_autostart_enabled,
             set_autostart_enabled,

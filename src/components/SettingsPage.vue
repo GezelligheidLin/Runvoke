@@ -4,7 +4,7 @@ import ResizableSplitPane from './ResizableSplitPane.vue'
 
 type Theme = 'light' | 'dark'
 type LogLinkAction = 'open' | 'copy'
-type SettingsSection = 'general' | 'behavior' | 'updates'
+type SettingsSection = 'general' | 'behavior' | 'updates' | 'project-config'
 
 defineProps<{
   autostartEnabled: boolean
@@ -18,6 +18,7 @@ defineProps<{
   updateChecking: boolean
   updateInstalling: boolean
   updateProgressLabel: string
+  projectConfigOpening: boolean
 }>()
 
 const emit = defineEmits<{
@@ -28,6 +29,7 @@ const emit = defineEmits<{
   setGithubLinkVisible: [visible: boolean]
   checkUpdate: []
   installUpdate: [event: MouseEvent]
+  openProjectConfigDirectory: []
 }>()
 
 const activeSection = ref<SettingsSection>('general')
@@ -70,6 +72,10 @@ function navigateTo(section: SettingsSection) {
         <button type="button" :class="{ active: activeSection === 'updates' }" :aria-current="activeSection === 'updates' ? 'page' : undefined" @click="navigateTo('updates')">
           <b>03</b>
           <span>应用更新</span>
+        </button>
+        <button type="button" :class="{ active: activeSection === 'project-config' }" :aria-current="activeSection === 'project-config' ? 'page' : undefined" @click="navigateTo('project-config')">
+          <b>04</b>
+          <span>项目配置</span>
         </button>
         <footer class="settings-navigation-footer">
           <span>Runvoke</span>
@@ -144,7 +150,7 @@ function navigateTo(section: SettingsSection) {
           </div>
           </section>
 
-          <section v-else class="settings-section settings-update-section">
+          <section v-else-if="activeSection === 'updates'" class="settings-section settings-update-section">
           <div class="settings-list">
             <article class="settings-item settings-version-item">
               <div>
@@ -169,6 +175,20 @@ function navigateTo(section: SettingsSection) {
                   {{ updateInstalling ? '正在安装' : '下载并安装' }}
                 </button>
               </div>
+            </article>
+          </div>
+          </section>
+
+          <section v-else class="settings-section">
+          <div class="settings-list">
+            <article class="settings-item">
+              <div>
+                <strong>项目配置目录</strong>
+                <p>打开本机保存项目、任务和分组配置的目录。配置中的环境变量值可能包含敏感信息，请谨慎处理。</p>
+              </div>
+              <button class="settings-secondary-button" type="button" :disabled="projectConfigOpening" @click="emit('openProjectConfigDirectory')">
+                {{ projectConfigOpening ? '正在打开' : '打开配置目录' }}
+              </button>
             </article>
           </div>
           </section>

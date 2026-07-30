@@ -575,7 +575,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   .settings-page { height: auto; min-height: 640px; overflow: visible; }
   .settings-page-header { min-height: 64px; padding: 0 20px; }
   .settings-page-body { display: block; padding: 20px; overflow: visible; }
-  .settings-navigation { position: static; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 28px; padding: 0; border-right: 0; }
+  .settings-navigation { position: static; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 28px; padding: 0; border-right: 0; }
   .settings-navigation > span { display: none; }
   .settings-navigation button { min-width: 0; justify-content: center; border-bottom: 2px solid transparent; text-align: center; }
   .settings-navigation button::before { display: none; }

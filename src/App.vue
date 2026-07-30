@@ -73,6 +73,7 @@ const availableUpdate = shallowRef<Update | null>(null)
 const updatePopoverOpen = ref(false)
 const updateChecking = ref(false)
 const updateInstalling = ref(false)
+const projectConfigOpening = ref(false)
 const updateProgress = ref({ received: 0, total: 0 })
 const logContainer = useTemplateRef<HTMLDivElement>('logContainer')
 const runListContainer = useTemplateRef<HTMLDivElement>('runListContainer')
@@ -478,6 +479,23 @@ function openSettingsPage() {
   projectOpenMenuOpen.value = false
   updatePopoverOpen.value = false
   settingsOpen.value = true
+}
+
+async function openProjectConfigDirectory() {
+  if (!isTauri() || projectConfigOpening.value)
+    return
+
+  projectConfigOpening.value = true
+  try {
+    await invoke('open_project_config_directory')
+    notify('success', '已在文件管理器中打开项目配置目录')
+  }
+  catch (value) {
+    notify('error', `打开项目配置目录失败：${String(value)}`)
+  }
+  finally {
+    projectConfigOpening.value = false
+  }
 }
 
 function openEditForm() {
@@ -1233,6 +1251,7 @@ function stateLabel(state?: string) {
         :update-checking="updateChecking"
         :update-installing="updateInstalling"
         :update-progress-label="updateProgressLabel()"
+        :project-config-opening="projectConfigOpening"
         @close="settingsOpen = false"
         @toggle-autostart="toggleAutostart"
         @set-theme="theme = $event"
@@ -1240,6 +1259,7 @@ function stateLabel(state?: string) {
         @set-github-link-visible="githubLinkVisible = $event"
         @check-update="checkForUpdate(true)"
         @install-update="requestInstallAvailableUpdate"
+        @open-project-config-directory="openProjectConfigDirectory"
       />
 
       <template v-else-if="selectedProject">
