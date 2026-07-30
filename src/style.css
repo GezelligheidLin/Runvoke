@@ -167,6 +167,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .update-popover strong { display: block; margin-top: 3px; color: var(--accent-strong); font-family: "Cascadia Mono", Consolas, monospace; font-size: 14px; }
 .update-popover p { display: -webkit-box; margin: 9px 0 0; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 3; white-space: pre-line; }
 .update-popover small { display: block; margin-top: 10px; color: var(--accent-strong); font-size: 10px; }
+.update-popover .preview-update-notice, .settings-preview-notice { color: var(--warning); font-weight: 650; }
 .update-popover > div { display: flex; justify-content: flex-end; gap: 7px; margin-top: 13px; }
 .update-popover button { min-width: 72px; height: 30px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: 3px; color: var(--ink); background: var(--surface-muted); cursor: pointer; font-size: 11px; font-weight: 600; }
 .update-popover button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }

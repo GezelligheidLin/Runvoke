@@ -56,9 +56,21 @@ const editingProject = ref<ProjectConfig | null>(null)
 const settingsOpen = ref(false)
 type Theme = 'light' | 'dark'
 type LogLinkAction = 'open' | 'copy'
+type PreviewUpdate = {
+  version: string
+  body: string
+}
+type PreviewUpdateDownloadProgress = {
+  received: number
+  total?: number
+}
+type AvailableUpdate =
+  | { channel: 'stable', update: Update, version: string, body: string }
+  | { channel: 'preview', version: string, body: string }
 const theme = ref<Theme>(readTheme())
 const logLinkAction = ref<LogLinkAction>(readLogLinkAction())
 const githubLinkVisible = ref(readGithubLinkVisible())
+const previewUpdatesEnabled = ref(readPreviewUpdatesEnabled())
 const saving = ref(false)
 const busyAction = ref('')
 const temporaryCommand = ref('')
@@ -74,7 +86,7 @@ const logFilter = ref<'all' | LogStream>('all')
 const autoScroll = ref(true)
 const toast = ref<{ type: 'success' | 'error', message: string } | null>(null)
 const appVersion = shallowRef('')
-const availableUpdate = shallowRef<Update | null>(null)
+const availableUpdate = shallowRef<AvailableUpdate | null>(null)
 const updatePopoverOpen = ref(false)
 const updateChecking = ref(false)
 const updateInstalling = ref(false)
@@ -180,6 +192,15 @@ function readGithubLinkVisible() {
   }
 }
 
+function readPreviewUpdatesEnabled() {
+  try {
+    return window.localStorage.getItem('runvoke-preview-updates-enabled') === 'true'
+  }
+  catch {
+    return false
+  }
+}
+
 watch(theme, (value) => {
   const dark = value === 'dark'
   document.documentElement.dataset.theme = value
@@ -227,6 +248,18 @@ watch(githubLinkVisible, (value) => {
   catch {
     // Repository entry visibility is optional when storage is unavailable.
   }
+})
+
+watch(previewUpdatesEnabled, (enabled) => {
+  try {
+    window.localStorage.setItem('runvoke-preview-updates-enabled', String(enabled))
+  }
+  catch {
+    // Preview update preference persistence is optional when storage is unavailable.
+  }
+  if (!enabled && availableUpdate.value?.channel === 'preview')
+    availableUpdate.value = null
+  void checkForUpdate()
 })
 
 type LogSegment = {
@@ -449,6 +482,12 @@ async function setupMcpBridge() {
       listen('mcp-install-update', () => {
         requestInstallAvailableUpdateFromMcp()
       }),
+      listen<PreviewUpdateDownloadProgress>('preview-update-download-progress', ({ payload }) => {
+        updateProgress.value = {
+          received: payload.received,
+          total: payload.total ?? 0,
+        }
+      }),
     ])
     mcpStatus.value = await invoke<McpServerStatus>('get_mcp_server_status')
   }
@@ -541,15 +580,82 @@ function notify(type: 'success' | 'error', message: string) {
   }, 3_200)
 }
 
+function compareVersions(left: string, right: string) {
+  const parse = (version: string) => {
+    const [core, prerelease = ''] = version.replace(/^v/i, '').split('-', 2)
+    return {
+      core: core.split('.').map(part => Number.parseInt(part, 10) || 0),
+      prerelease: prerelease.split('.').filter(Boolean),
+    }
+  }
+  const leftParts = parse(left)
+  const rightParts = parse(right)
+  for (let index = 0; index < Math.max(leftParts.core.length, rightParts.core.length); index += 1) {
+    const difference = (leftParts.core[index] ?? 0) - (rightParts.core[index] ?? 0)
+    if (difference)
+      return difference
+  }
+  if (!leftParts.prerelease.length || !rightParts.prerelease.length)
+    return leftParts.prerelease.length ? -1 : rightParts.prerelease.length ? 1 : 0
+  for (let index = 0; index < Math.max(leftParts.prerelease.length, rightParts.prerelease.length); index += 1) {
+    const leftIdentifier = leftParts.prerelease[index]
+    const rightIdentifier = rightParts.prerelease[index]
+    if (leftIdentifier === undefined)
+      return -1
+    if (rightIdentifier === undefined)
+      return 1
+    if (leftIdentifier === rightIdentifier)
+      continue
+    const leftNumber = Number.parseInt(leftIdentifier, 10)
+    const rightNumber = Number.parseInt(rightIdentifier, 10)
+    const leftIsNumber = String(leftNumber) === leftIdentifier
+    const rightIsNumber = String(rightNumber) === rightIdentifier
+    if (leftIsNumber && rightIsNumber)
+      return leftNumber - rightNumber
+    if (leftIsNumber)
+      return -1
+    if (rightIsNumber)
+      return 1
+    return leftIdentifier.localeCompare(rightIdentifier)
+  }
+  return 0
+}
+
+function stableUpdate(update: Update | null): AvailableUpdate | null {
+  return update
+    ? { channel: 'stable', update, version: update.version, body: update.body ?? '' }
+    : null
+}
+
+function previewUpdate(update: PreviewUpdate | null): AvailableUpdate | null {
+  return update
+    ? { channel: 'preview', version: update.version, body: update.body }
+    : null
+}
+
 async function checkForUpdate(showResult = false) {
   if (!isTauri() || updateInstalling.value || updateChecking.value)
     return
 
   updateChecking.value = true
   try {
-    availableUpdate.value = await check()
+    const stableResult = await check()
+    const stable = stableUpdate(stableResult)
+    let preview: AvailableUpdate | null = null
+    if (previewUpdatesEnabled.value) {
+      try {
+        preview = previewUpdate(await invoke<PreviewUpdate | null>('check_preview_update'))
+      }
+      catch (value) {
+        if (!stable)
+          throw value
+      }
+    }
+    availableUpdate.value = preview && (!stable || compareVersions(preview.version, stable.version) > 0)
+      ? preview
+      : stable
     if (availableUpdate.value && showResult) {
-      notify('success', `发现新版本 v${availableUpdate.value.version}`)
+      notify('success', `${availableUpdate.value.channel === 'preview' ? '发现预览版本' : '发现新版本'} v${availableUpdate.value.version}`)
     }
     else if (!availableUpdate.value && showResult) {
       notify('success', '当前已是最新版本')
@@ -592,7 +698,10 @@ async function installAvailableUpdate() {
   updateProgress.value = { received: 0, total: 0 }
   try {
     await stopAllActiveRuns()
-    await update.downloadAndInstall(trackUpdateDownload)
+    if (update.channel === 'preview')
+      await invoke('install_preview_update')
+    else
+      await update.update.downloadAndInstall(trackUpdateDownload)
     await relaunch()
   }
   catch (value) {
@@ -930,11 +1039,14 @@ function requestInstallAvailableUpdate(event: MouseEvent) {
     return
   }
   const count = runningCount.value
+  const previewNotice = availableUpdate.value?.channel === 'preview'
+    ? '这是预览版本，可能包含未完成或不稳定的功能。'
+    : ''
   requestConfirmation(
     event,
     count
-      ? `安装更新前将停止所有项目当前运行的 ${count} 个任务，并在安装完成后重启 Runvoke。是否继续？`
-      : '安装更新后将重启 Runvoke。当前没有运行中的任务，是否继续？',
+      ? `${previewNotice}安装更新前将停止所有项目当前运行的 ${count} 个任务，并在安装完成后重启 Runvoke。是否继续？`
+      : `${previewNotice}安装更新后将重启 Runvoke。当前没有运行中的任务，是否继续？`,
     count ? '停止全部并更新' : '确认更新',
     installAvailableUpdate,
     'primary',
@@ -1062,13 +1174,16 @@ function requestInstallAvailableUpdateFromMcp() {
     return
   }
   const count = runningCount.value
+  const previewNotice = availableUpdate.value?.channel === 'preview'
+    ? '这是预览版本，可能包含未完成或不稳定的功能。'
+    : ''
   const width = Math.min(280, window.innerWidth - 24)
   const right = window.innerWidth - 24
   requestConfirmationAt(
     { top: window.innerHeight - 68, bottom: window.innerHeight - 34, left: right - 132, right },
     count
-      ? `安装更新前将停止所有项目当前运行的 ${count} 个任务，并在安装完成后重启 Runvoke。是否继续？`
-      : '安装更新后将重启 Runvoke。当前没有运行中的任务，是否继续？',
+      ? `${previewNotice}安装更新前将停止所有项目当前运行的 ${count} 个任务，并在安装完成后重启 Runvoke。是否继续？`
+      : `${previewNotice}安装更新后将重启 Runvoke。当前没有运行中的任务，是否继续？`,
     count ? '停止全部并更新' : '确认更新',
     installAvailableUpdate,
     'primary',
@@ -1548,11 +1663,12 @@ function stateLabel(state?: string) {
           @click="updatePopoverOpen = !updatePopoverOpen"
         ><i />更新</button>
         <span v-else-if="appVersion" class="version-label">v{{ appVersion }}</span>
-        <Transition name="update-popover">
-          <section v-if="updatePopoverOpen && availableUpdate" class="update-popover" @keydown.esc="updatePopoverOpen = false">
-            <span>发现新版本</span>
-            <strong>v{{ availableUpdate.version }}</strong>
-            <OverflowTooltip as="p" :text="availableUpdate.body || '已准备好下载并安装最新版本。'">{{ availableUpdate.body || '已准备好下载并安装最新版本。' }}</OverflowTooltip>
+          <Transition name="update-popover">
+            <section v-if="updatePopoverOpen && availableUpdate" class="update-popover" @keydown.esc="updatePopoverOpen = false">
+              <span>{{ availableUpdate.channel === 'preview' ? '发现预览版本' : '发现新版本' }}</span>
+              <strong>v{{ availableUpdate.version }}</strong>
+              <small v-if="availableUpdate.channel === 'preview'" class="preview-update-notice">预览版本可能包含未完成或不稳定的功能。</small>
+              <OverflowTooltip as="p" :text="availableUpdate.body || '已准备好下载并安装最新版本。'">{{ availableUpdate.body || '已准备好下载并安装最新版本。' }}</OverflowTooltip>
             <small v-if="updateInstalling">{{ updateProgressLabel() }}</small>
             <div>
               <button type="button" :disabled="updateInstalling || updateChecking" @click="checkForUpdate(true)">重新检查</button>
@@ -1573,9 +1689,11 @@ function stateLabel(state?: string) {
         :theme="theme"
         :log-link-action="logLinkAction"
         :github-link-visible="githubLinkVisible"
-        :app-version="appVersion"
-        :available-update-version="availableUpdate?.version ?? ''"
-        :available-update-body="availableUpdate?.body ?? ''"
+          :app-version="appVersion"
+          :available-update-version="availableUpdate?.version ?? ''"
+          :available-update-body="availableUpdate?.body ?? ''"
+          :available-update-preview="availableUpdate?.channel === 'preview'"
+          :preview-updates-enabled="previewUpdatesEnabled"
         :update-checking="updateChecking"
         :update-installing="updateInstalling"
         :update-progress-label="updateProgressLabel()"
@@ -1589,7 +1707,8 @@ function stateLabel(state?: string) {
         @toggle-autostart="toggleAutostart"
         @set-theme="theme = $event"
         @set-log-link-action="logLinkAction = $event"
-        @set-github-link-visible="githubLinkVisible = $event"
+          @set-github-link-visible="githubLinkVisible = $event"
+          @set-preview-updates-enabled="previewUpdatesEnabled = $event"
         @check-update="checkForUpdate(true)"
         @install-update="requestInstallAvailableUpdate"
         @open-project-config-directory="openProjectConfigDirectory"

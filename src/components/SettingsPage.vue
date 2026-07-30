@@ -18,6 +18,8 @@ defineProps<{
   appVersion: string
   availableUpdateVersion: string
   availableUpdateBody: string
+  availableUpdatePreview: boolean
+  previewUpdatesEnabled: boolean
   updateChecking: boolean
   updateInstalling: boolean
   updateProgressLabel: string
@@ -35,6 +37,7 @@ const emit = defineEmits<{
   setTheme: [theme: Theme]
   setLogLinkAction: [action: LogLinkAction]
   setGithubLinkVisible: [visible: boolean]
+  setPreviewUpdatesEnabled: [enabled: boolean]
   checkUpdate: []
   installUpdate: [event: MouseEvent]
   openProjectConfigDirectory: []
@@ -234,15 +237,32 @@ onBeforeUnmount(() => {
             <article class="settings-item settings-version-item">
               <div>
                 <strong>当前版本</strong>
-                <p>{{ availableUpdateVersion ? `发现可用版本 v${availableUpdateVersion}` : '检查并获取最新的功能与问题修复。' }}</p>
+                <p>{{ availableUpdateVersion ? `${availableUpdatePreview ? '发现预览版本' : '发现可用版本'} v${availableUpdateVersion}` : '检查并获取最新的功能与问题修复。' }}</p>
               </div>
               <code>{{ appVersion ? `v${appVersion}` : '读取中' }}</code>
             </article>
 
+            <article class="settings-item">
+              <div>
+                <strong>接收预览版本</strong>
+                <p>开启后会额外检查开发中的预览版本。预览版本可能包含未完成或不稳定的功能，建议仅用于体验新功能。</p>
+              </div>
+              <button
+                class="settings-switch"
+                :class="{ active: previewUpdatesEnabled }"
+                type="button"
+                role="switch"
+                :aria-checked="previewUpdatesEnabled"
+                :aria-label="previewUpdatesEnabled ? '关闭接收预览版本' : '开启接收预览版本'"
+                :disabled="updateChecking || updateInstalling"
+                @click="emit('setPreviewUpdatesEnabled', !previewUpdatesEnabled)"
+              ><i /></button>
+            </article>
+
             <article class="settings-update-actions">
               <div>
-                <strong>{{ availableUpdateVersion ? '新版本已准备好' : '保持应用为最新版本' }}</strong>
-                <p v-if="availableUpdateVersion">{{ availableUpdateBody || '已准备好下载并安装最新版本。' }}</p>
+                <strong>{{ availableUpdateVersion ? availableUpdatePreview ? '预览版本已准备好' : '新版本已准备好' : '保持应用为最新版本' }}</strong>
+                <p v-if="availableUpdateVersion" :class="{ 'settings-preview-notice': availableUpdatePreview }">{{ availableUpdatePreview ? `这是预览版本，可能包含未完成或不稳定的功能。${availableUpdateBody ? ` ${availableUpdateBody}` : ''}` : availableUpdateBody || '已准备好下载并安装最新版本。' }}</p>
                 <p v-else>{{ updateChecking ? '正在连接更新服务…' : '你也可以随时手动检查更新。' }}</p>
                 <small v-if="updateInstalling">{{ updateProgressLabel }}</small>
               </div>

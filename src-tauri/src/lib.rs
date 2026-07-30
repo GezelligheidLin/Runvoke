@@ -18,6 +18,7 @@ use tauri::{
     AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_updater::{Update, UpdaterExt};
 use uuid::Uuid;
 
 mod mcp_server;
@@ -71,6 +72,8 @@ const LOG_BATCH_LIMIT: usize = 256;
 const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(50);
 const LOG_MESSAGE_LIMIT: usize = 16_000;
 const MCP_LOG_HISTORY_LIMIT: usize = 500;
+const PREVIEW_UPDATE_ENDPOINT: &str =
+    "https://runvoke-updates.oss-cn-shanghai.aliyuncs.com/runvoke/latest-prerelease.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +119,20 @@ struct McpServerStatus {
     port: u16,
     endpoint: String,
     authorization_token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewUpdate {
+    version: String,
+    body: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewUpdateDownloadProgress {
+    received: usize,
+    total: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -251,6 +268,7 @@ struct AppState {
     logs: Mutex<HashMap<String, Vec<LogEvent>>>,
     log_sender: OnceLock<SyncSender<LogEvent>>,
     mcp: Mutex<Option<mcp_server::McpServerRuntime>>,
+    preview_update: Mutex<Option<Update>>,
 }
 
 fn now_millis() -> u64 {
@@ -472,6 +490,67 @@ fn detect_project_name(directory: String) -> Result<DetectedProjectName, String>
         name: name.to_owned(),
         source: "目录名".into(),
     })
+}
+
+#[tauri::command]
+async fn check_preview_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<PreviewUpdate>, String> {
+    let endpoint = PREVIEW_UPDATE_ENDPOINT
+        .parse()
+        .map_err(|error| format!("预览更新地址无效：{error}"))?;
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![endpoint])
+        .map_err(|error| format!("初始化预览更新检查失败：{error}"))?
+        .build()
+        .map_err(|error| format!("初始化预览更新器失败：{error}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|error| format!("检查预览更新失败：{error}"))?;
+
+    let preview = update.as_ref().map(|update| PreviewUpdate {
+        version: update.version.clone(),
+        body: update.body.clone().unwrap_or_default(),
+    });
+    let mut pending = state
+        .preview_update
+        .lock()
+        .map_err(|_| "预览更新状态不可用".to_owned())?;
+    *pending = update;
+    Ok(preview)
+}
+
+#[tauri::command]
+async fn install_preview_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let update = state
+        .preview_update
+        .lock()
+        .map_err(|_| "预览更新状态不可用".to_owned())?
+        .take()
+        .ok_or_else(|| "没有可安装的预览更新，请重新检查更新".to_owned())?;
+    let progress_app = app.clone();
+    let _ = app.emit(
+        "preview-update-download-progress",
+        PreviewUpdateDownloadProgress {
+            received: 0,
+            total: None,
+        },
+    );
+    update
+        .download_and_install(
+            move |received, total| {
+                let _ = progress_app.emit(
+                    "preview-update-download-progress",
+                    PreviewUpdateDownloadProgress { received, total },
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|error| format!("安装预览更新失败：{error}"))
 }
 
 fn hex_value(value: u8) -> Option<u8> {
@@ -1877,6 +1956,8 @@ pub fn run() {
             get_autostart_enabled,
             set_autostart_enabled,
             set_resize_paint_color,
+            check_preview_update,
+            install_preview_update,
         ])
         .setup(|app| {
             setup_log_dispatcher(app)?;

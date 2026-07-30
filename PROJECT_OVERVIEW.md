@@ -23,6 +23,7 @@ Runvoke 是面向本地开发者的桌面项目启动器。它将多个项目的
 - 支持在设置中切换浅色或深色主题，并在本机保留主题偏好。
 - 设置使用独立全宽页面，按常规、运行与日志、应用更新分区；进入设置时隐藏侧栏，返回工作台后恢复项目导航。
 - 设置新增“项目配置”分区，可直接打开由应用固定定位的本机项目配置目录；目录内的环境变量值可能包含敏感信息。
+- 应用更新默认仅检查稳定版本；用户可在设置中主动开启预览版本检查。预览版本使用独立更新清单，并在发现、下载前确认时明确提示其可能包含未完成或不稳定功能。
 - 设置新增“从其他软件导入”入口，支持读取 VS Code、Code Insiders、VSCodium 和 Cursor 的最近工作区目录，展示清单后批量导入并按目录去重；所有导入清单可全局或逐项选择使用目录名替代探测名称。
 - 提供默认关闭的本地 MCP 服务，固定监听 `127.0.0.1` 并通过 Bearer 令牌认证；设置页显示端点、端口和客户端配置，供本机 Agent 接入。
 - MCP 可读取项目、分组、运行状态与近期日志，并可编辑已有项目、调整分组、启动/停止任务、运行临时命令、修改受控设置及请求检查更新；项目数据不返回环境变量值，日志按已保存的环境变量值脱敏，不提供任何删除工具。MCP 的导入请求只能携带 Agent 显式提交的候选目录，并打开独立的 Agent 前台筛选清单，不会读取或混入 VS Code/Cursor 记录；用户勾选确认后才会导入，更新安装也必须在前台确认。
@@ -35,7 +36,7 @@ Runvoke 是面向本地开发者的桌面项目启动器。它将多个项目的
 ## 分支策略
 
 - `main`：稳定正式版本，只接受完成验证的改动并用于创建 `vX.Y.Z` 发布标签。
-- `develop`：新功能预览集成分支，版本使用 SemVer 预发布标识（例如 `0.1.13-dev.1`），可创建 GitHub Pre-release，但不创建正式 GitHub Release，也不覆盖稳定更新清单。
+- `develop`：新功能预览集成分支，版本使用 SemVer 预发布标识（例如 `0.1.13-dev.1`），可创建 GitHub Pre-release，但不创建正式 GitHub Release；预发布写入独立 `latest-prerelease.json`，不覆盖稳定 `latest.json`，且用户需主动开启预览更新检查。
 - `feature/<功能名>`：从 `develop` 创建的短期独立功能分支；功能验证后合并回 `develop`。
 
 ## 技术栈
@@ -69,7 +70,7 @@ pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-发布新版本时，使 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml` 的版本保持一致，更新 `RELEASE_NOTES.md` 中的新增功能、问题修复和体验优化，并推送同版本的 `vX.Y.Z` 标签。GitHub Actions 会构建已签名的 NSIS 安装包，先上传版本化安装包及签名到阿里云 OSS，再上传 `latest.json` 更新清单，同时创建 GitHub Release 备份。仓库 Secret `TAURI_SIGNING_PRIVATE_KEY`、`ALIYUN_OSS_ACCESS_KEY_ID` 和 `ALIYUN_OSS_ACCESS_KEY_SECRET` 必须保存签名私钥和最小权限 OSS 写入凭据。
+发布新版本时，使 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml` 的版本保持一致，更新 `RELEASE_NOTES.md` 中的新增功能、问题修复和体验优化，并推送同版本的 `vX.Y.Z` 标签。GitHub Actions 会构建已签名的 NSIS 安装包，先上传版本化安装包及签名到阿里云 OSS；稳定标签最后上传 `latest.json`，预发布标签最后上传 `latest-prerelease.json`，并创建对应的 GitHub Release 或 Pre-release 备份。仓库 Secret `TAURI_SIGNING_PRIVATE_KEY`、`ALIYUN_OSS_ACCESS_KEY_ID` 和 `ALIYUN_OSS_ACCESS_KEY_SECRET` 必须保存签名私钥和最小权限 OSS 写入凭据。
 
 ## 验收标准
 
@@ -124,4 +125,5 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - 2026-07-30：新增 `develop` 预览集成分支策略；设置新增“项目配置”页面，可打开本机项目配置目录。
 - 2026-07-30：新增 VS Code 工作区导入弹窗、设置页导入入口和更新后一次性导入询问。
 - 2026-07-31：项目导入新增 Cursor 来源，复用本机最近工作区记录、路径去重与勾选导入流程。
+- 2026-07-31：预览更新改为用户主动开启的独立通道，稳定与预览更新清单隔离，并在界面与安装确认中提示预览版本风险。
 - 2026-07-31：新增默认关闭的本地 MCP 服务，支持受控项目工作台操作、前台确认导入与更新请求，并限制为回环地址和 Bearer 令牌认证。
