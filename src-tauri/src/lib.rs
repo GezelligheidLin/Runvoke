@@ -12,10 +12,13 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+#[cfg(not(windows))]
+use tauri::LogicalSize;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, RunEvent, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -74,6 +77,36 @@ const LOG_MESSAGE_LIMIT: usize = 16_000;
 const MCP_LOG_HISTORY_LIMIT: usize = 500;
 const PREVIEW_UPDATE_ENDPOINT: &str =
     "https://runvoke-updates.oss-cn-shanghai.aliyuncs.com/runvoke/latest-prerelease.json";
+const NOTIFICATION_WINDOW_LABEL: &str = "system-notification";
+const NOTIFICATION_WINDOW_WIDTH: f64 = 380.0;
+const NOTIFICATION_WINDOW_HEIGHT: f64 = 132.0;
+const NOTIFICATION_WINDOW_MARGIN: f64 = 18.0;
+const NOTIFICATION_CARD_HEIGHT: f64 = 114.0;
+const NOTIFICATION_STACK_GAP: f64 = 8.0;
+const MAX_VISIBLE_NOTIFICATIONS: u8 = 3;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotificationConfig {
+    id: String,
+    theme: String,
+    position: String,
+    stacking_enabled: bool,
+    tone: String,
+    title: String,
+    message: String,
+    meta: String,
+    dedupe_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotificationHitRegion {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -261,6 +294,12 @@ impl Drop for JobHandle {
 }
 
 #[derive(Default)]
+struct NotificationBridge {
+    ready: bool,
+    pending: Vec<NotificationConfig>,
+}
+
+#[derive(Default)]
 struct AppState {
     processes: Mutex<HashMap<String, ManagedProcess>>,
     runs: Mutex<HashMap<String, RuntimeStatus>>,
@@ -269,6 +308,7 @@ struct AppState {
     log_sender: OnceLock<SyncSender<LogEvent>>,
     mcp: Mutex<Option<mcp_server::McpServerRuntime>>,
     preview_update: Mutex<Option<Update>>,
+    notification_bridge: Mutex<NotificationBridge>,
 }
 
 fn now_millis() -> u64 {
@@ -601,7 +641,10 @@ fn vscode_uri_to_path(value: &str) -> Option<PathBuf> {
     let decoded = percent_decode(uri)?;
     #[cfg(windows)]
     {
-        let path = decoded.strip_prefix('/').unwrap_or(&decoded).replace('/', "\\");
+        let path = decoded
+            .strip_prefix('/')
+            .unwrap_or(&decoded)
+            .replace('/', "\\");
         return Some(PathBuf::from(path));
     }
     #[cfg(not(windows))]
@@ -636,21 +679,33 @@ fn workspace_paths_from_storage(storage: &serde_json::Value) -> Vec<PathBuf> {
                 let Some(path) = vscode_uri_to_path(uri) else {
                     continue;
                 };
-                if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("code-workspace")) {
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("code-workspace"))
+                {
                     let Some(content) = fs::read_to_string(&path).ok() else {
                         continue;
                     };
                     let Ok(workspace) = serde_json::from_str::<serde_json::Value>(&content) else {
                         continue;
                     };
-                    if let Some(folders) = workspace.get("folders").and_then(serde_json::Value::as_array) {
+                    if let Some(folders) = workspace
+                        .get("folders")
+                        .and_then(serde_json::Value::as_array)
+                    {
                         for folder in folders {
-                            if let Some(folder_uri) = folder.get("uri").and_then(serde_json::Value::as_str) {
+                            if let Some(folder_uri) =
+                                folder.get("uri").and_then(serde_json::Value::as_str)
+                            {
                                 if let Some(folder_path) = vscode_uri_to_path(folder_uri) {
                                     paths.push(folder_path);
                                 }
-                            } else if let Some(folder_path) = folder.get("path").and_then(serde_json::Value::as_str) {
-                                paths.push(path.parent().unwrap_or(Path::new(".")).join(folder_path));
+                            } else if let Some(folder_path) =
+                                folder.get("path").and_then(serde_json::Value::as_str)
+                            {
+                                paths.push(
+                                    path.parent().unwrap_or(Path::new(".")).join(folder_path),
+                                );
                             }
                         }
                     }
@@ -666,7 +721,10 @@ fn workspace_paths_from_storage(storage: &serde_json::Value) -> Vec<PathBuf> {
 fn suggested_project_command(directory: &Path) -> Option<String> {
     if let Ok(content) = fs::read_to_string(directory.join("package.json")) {
         if let Ok(package) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(scripts) = package.get("scripts").and_then(serde_json::Value::as_object) {
+            if let Some(scripts) = package
+                .get("scripts")
+                .and_then(serde_json::Value::as_object)
+            {
                 for name in ["dev", "start", "serve", "watch"] {
                     if scripts.contains_key(name) {
                         return Some(format!("pnpm {name}"));
@@ -714,7 +772,10 @@ fn list_editor_projects(
             if !seen.insert(key) {
                 return None;
             }
-            let name = canonical_directory.file_name()?.to_string_lossy().into_owned();
+            let name = canonical_directory
+                .file_name()?
+                .to_string_lossy()
+                .into_owned();
             Some(ImportedProject {
                 name,
                 directory: display_directory(&canonical_directory.to_string_lossy()),
@@ -758,7 +819,10 @@ fn mcp_server_status(app: &AppHandle, state: &AppState) -> Result<McpServerStatu
 }
 
 #[tauri::command]
-fn get_mcp_server_status(app: AppHandle, state: State<'_, AppState>) -> Result<McpServerStatus, String> {
+fn get_mcp_server_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<McpServerStatus, String> {
     mcp_server_status(&app, state.inner())
 }
 
@@ -782,7 +846,8 @@ async fn set_mcp_server_enabled(
         if store.mcp.token.is_empty() {
             store.mcp.token = Uuid::new_v4().to_string();
         }
-        let runtime = mcp_server::start(app.clone(), store.mcp.port, store.mcp.token.clone()).await?;
+        let runtime =
+            mcp_server::start(app.clone(), store.mcp.port, store.mcp.token.clone()).await?;
         state
             .mcp
             .lock()
@@ -791,11 +856,7 @@ async fn set_mcp_server_enabled(
         store.mcp.enabled = true;
         save_store(&app, &store)?;
     } else {
-        if let Some(runtime) = state
-            .mcp
-            .lock()
-            .map_err(|_| "MCP 服务状态锁已损坏")?
-            .take()
+        if let Some(runtime) = state.mcp.lock().map_err(|_| "MCP 服务状态锁已损坏")?.take()
         {
             runtime.stop();
         }
@@ -1580,8 +1641,10 @@ fn list_runtime_status(
             } else {
                 "failed"
             }
-        } else {
+        } else if exit_code == &Some(0) {
             "stopped"
+        } else {
+            "failed"
         }
         .into();
         status.pid = None;
@@ -1773,6 +1836,394 @@ fn set_resize_paint_color(red: u8, green: u8, blue: u8) {
     window_resize_guard::update_color(red, green, blue);
 }
 
+fn notification_window_coordinates(
+    position: &str,
+    work_x: i32,
+    work_y: i32,
+    work_width: u32,
+    work_height: u32,
+    scale_factor: f64,
+    window_height: f64,
+) -> Result<(i32, i32), String> {
+    let window_width = (notification_window_width() * scale_factor).round() as i32;
+    let window_height = (window_height * scale_factor).round() as i32;
+    let available_width = i32::try_from(work_width).unwrap_or(i32::MAX);
+    let available_height = i32::try_from(work_height).unwrap_or(i32::MAX);
+    let left = work_x;
+    let center = work_x.saturating_add((available_width - window_width).max(0) / 2);
+    let right = work_x.saturating_add((available_width - window_width).max(0));
+    let top = work_y;
+    let bottom = work_y.saturating_add((available_height - window_height).max(0));
+
+    match position {
+        "top-left" => Ok((left, top)),
+        "top-center" => Ok((center, top)),
+        "top-right" => Ok((right, top)),
+        "bottom-left" => Ok((left, bottom)),
+        "bottom-center" => Ok((center, bottom)),
+        "bottom-right" => Ok((right, bottom)),
+        _ => Err("通知位置无效".into()),
+    }
+}
+
+fn notification_window_width() -> f64 {
+    NOTIFICATION_WINDOW_WIDTH + NOTIFICATION_WINDOW_MARGIN
+}
+
+fn notification_window_height(count: u8) -> f64 {
+    NOTIFICATION_WINDOW_HEIGHT
+        + f64::from(count.saturating_sub(1)) * (NOTIFICATION_CARD_HEIGHT + NOTIFICATION_STACK_GAP)
+        + NOTIFICATION_WINDOW_MARGIN
+}
+
+fn build_notification_window(
+    app: &AppHandle,
+    theme: &str,
+    position: &str,
+    prewarmed: bool,
+) -> Result<WebviewWindow, String> {
+    let notification_config = serde_json::json!({
+        "theme": theme,
+        "position": position,
+        "prewarmed": prewarmed,
+    });
+    let initialization_script =
+        format!("window.__RUNVOKE_NOTIFICATION__ = {};", notification_config);
+    let window = WebviewWindowBuilder::new(
+        app,
+        NOTIFICATION_WINDOW_LABEL,
+        WebviewUrl::App("index.html".into()),
+    )
+    .initialization_script(initialization_script)
+    .title("Runvoke notification")
+    .inner_size(
+        notification_window_width(),
+        notification_window_height(MAX_VISIBLE_NOTIFICATIONS),
+    )
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focusable(false)
+    .visible(false)
+    .build()
+    .map_err(|error| format!("无法创建测试通知：{error}"))?;
+    window_resize_guard::configure_notification_window(&window)?;
+    Ok(window)
+}
+
+fn ensure_notification_window(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() != NOTIFICATION_WINDOW_LABEL {
+        return Err("该操作仅允许通知窗口调用".into());
+    }
+    Ok(())
+}
+
+fn show_notification_inner(
+    app: &AppHandle,
+    state: &AppState,
+    position: String,
+    theme: String,
+    stacking_enabled: bool,
+    tone: String,
+    title: String,
+    message: String,
+    meta: String,
+    dedupe_key: String,
+) -> Result<(), String> {
+    let notification_id = Uuid::new_v4().to_string();
+    if theme != "light" && theme != "dark" {
+        return Err("通知主题无效".into());
+    }
+    if !matches!(
+        position.as_str(),
+        "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right"
+    ) {
+        return Err("通知位置无效".into());
+    }
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不可用".to_owned())?;
+    let monitor = main_window
+        .current_monitor()
+        .map_err(|error| format!("无法读取当前显示器：{error}"))?
+        .or(main_window
+            .primary_monitor()
+            .map_err(|error| format!("无法读取主显示器：{error}"))?)
+        .ok_or_else(|| "没有可用的显示器".to_owned())?;
+    let work_area = monitor.work_area();
+    let (x, y) = notification_window_coordinates(
+        &position,
+        work_area.position.x,
+        work_area.position.y,
+        work_area.size.width,
+        work_area.size.height,
+        monitor.scale_factor(),
+        notification_window_height(MAX_VISIBLE_NOTIFICATIONS),
+    )?;
+
+    let notification = match app.get_webview_window(NOTIFICATION_WINDOW_LABEL) {
+        Some(window) => window,
+        None => {
+            state
+                .notification_bridge
+                .lock()
+                .map_err(|_| "通知窗口状态锁已损坏")?
+                .ready = false;
+            build_notification_window(&app, &theme, &position, false)?
+        }
+    };
+    notification
+        .set_position(PhysicalPosition::new(x, y))
+        .map_err(|error| format!("无法定位测试通知：{error}"))?;
+    let notification_config = NotificationConfig {
+        id: notification_id.clone(),
+        theme,
+        position,
+        stacking_enabled,
+        tone,
+        title,
+        message,
+        meta,
+        dedupe_key,
+    };
+    let mut notification_bridge = state
+        .notification_bridge
+        .lock()
+        .map_err(|_| "通知窗口状态锁已损坏")?;
+    notification_bridge
+        .pending
+        .push(notification_config.clone());
+    if notification_bridge.pending.len() > usize::from(MAX_VISIBLE_NOTIFICATIONS) {
+        notification_bridge.pending.remove(0);
+    }
+    let notification_ready = notification_bridge.ready;
+    drop(notification_bridge);
+    if notification_ready {
+        if notification
+            .emit("notification-config", notification_config)
+            .is_err()
+        {
+            state
+                .notification_bridge
+                .lock()
+                .map_err(|_| "通知窗口状态锁已损坏")?
+                .ready = false;
+        }
+    }
+    Ok(())
+}
+
+fn validate_notification_text(
+    value: String,
+    field: &str,
+    maximum_length: usize,
+) -> Result<String, String> {
+    let value = value.trim().to_owned();
+    if value.chars().count() > maximum_length {
+        return Err(format!("通知{field}过长"));
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+async fn show_desktop_notification(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    position: String,
+    theme: String,
+    stacking_enabled: bool,
+    tone: String,
+    title: String,
+    message: String,
+    meta: String,
+    dedupe_key: String,
+) -> Result<(), String> {
+    if !matches!(tone.as_str(), "success" | "error") {
+        return Err("通知类型无效".into());
+    }
+    let title = validate_notification_text(title, "标题", 120)?;
+    if title.is_empty() {
+        return Err("通知标题不能为空".into());
+    }
+    let message = validate_notification_text(message, "内容", 280)?;
+    let meta = validate_notification_text(meta, "附加信息", 120)?;
+    let dedupe_key = validate_notification_text(dedupe_key, "去重标识", 120)?;
+    show_notification_inner(
+        &app,
+        state.inner(),
+        position,
+        theme,
+        stacking_enabled,
+        tone,
+        title,
+        message,
+        meta,
+        dedupe_key,
+    )
+}
+
+#[tauri::command]
+async fn show_test_notification(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    position: String,
+    theme: String,
+    stacking_enabled: bool,
+) -> Result<(), String> {
+    show_notification_inner(
+        &app,
+        state.inner(),
+        position,
+        theme,
+        stacking_enabled,
+        "success".into(),
+        "测试通知已送达".into(),
+        "这是一条由独立桌面窗口显示的自定义通知。".into(),
+        "系统通知测试".into(),
+        String::new(),
+    )
+}
+
+#[tauri::command]
+fn notification_window_ready(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Vec<NotificationConfig>, String> {
+    ensure_notification_window(&window)?;
+    let mut notification_bridge = state
+        .notification_bridge
+        .lock()
+        .map_err(|_| "通知窗口状态锁已损坏")?;
+    notification_bridge.ready = true;
+    Ok(notification_bridge.pending.clone())
+}
+
+#[tauri::command]
+fn notification_received(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    ensure_notification_window(&window)?;
+    let mut notification_bridge = state
+        .notification_bridge
+        .lock()
+        .map_err(|_| "通知窗口状态锁已损坏")?;
+    notification_bridge
+        .pending
+        .retain(|notification| notification.id != id);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_notification_hit_regions(
+    window: WebviewWindow,
+    regions: Vec<NotificationHitRegion>,
+) -> Result<(), String> {
+    ensure_notification_window(&window)?;
+    if regions.len() > usize::from(MAX_VISIBLE_NOTIFICATIONS) {
+        return Err("通知命中区域数量无效".into());
+    }
+    let scale = window
+        .scale_factor()
+        .map_err(|error| format!("无法读取通知窗口缩放比例：{error}"))?;
+    let regions = regions
+        .into_iter()
+        .filter(|region| {
+            region.x.is_finite()
+                && region.y.is_finite()
+                && region.width.is_finite()
+                && region.height.is_finite()
+                && region.width > 0.0
+                && region.height > 0.0
+        })
+        .map(|region| {
+            (
+                (region.x * scale).floor() as i32,
+                (region.y * scale).floor() as i32,
+                ((region.x + region.width) * scale).ceil() as i32,
+                ((region.y + region.height) * scale).ceil() as i32,
+            )
+        })
+        .collect();
+    window_resize_guard::set_notification_window_regions(&window, regions)
+}
+
+#[tauri::command]
+fn redraw_notification_window(window: WebviewWindow) -> Result<(), String> {
+    ensure_notification_window(&window)?;
+    window_resize_guard::show_notification_window(&window)?;
+    window_resize_guard::redraw(&window)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn resize_notification_window(
+    app: AppHandle,
+    position: String,
+    count: u8,
+) -> Result<(), String> {
+    if count == 0 || count > MAX_VISIBLE_NOTIFICATIONS {
+        return Err("通知数量无效".into());
+    }
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不可用".to_owned())?;
+    let monitor = main_window
+        .current_monitor()
+        .map_err(|error| format!("无法读取当前显示器：{error}"))?
+        .or(main_window
+            .primary_monitor()
+            .map_err(|error| format!("无法读取主显示器：{error}"))?)
+        .ok_or_else(|| "没有可用的显示器".to_owned())?;
+    let height = notification_window_height(count);
+    let work_area = monitor.work_area();
+    let (x, y) = notification_window_coordinates(
+        &position,
+        work_area.position.x,
+        work_area.position.y,
+        work_area.size.width,
+        work_area.size.height,
+        monitor.scale_factor(),
+        height,
+    )?;
+    let notification = app
+        .get_webview_window(NOTIFICATION_WINDOW_LABEL)
+        .ok_or_else(|| "通知窗口不可用".to_owned())?;
+    #[cfg(windows)]
+    window_resize_guard::set_outer_bounds(
+        &notification,
+        x,
+        y,
+        (notification_window_width() * monitor.scale_factor()).round() as i32,
+        (height * monitor.scale_factor()).round() as i32,
+    )?;
+    #[cfg(not(windows))]
+    {
+        notification
+            .set_size(LogicalSize::new(notification_window_width(), height))
+            .map_err(|error| format!("无法调整测试通知：{error}"))?;
+        notification
+            .set_position(PhysicalPosition::new(x, y))
+            .map_err(|error| format!("无法定位测试通知：{error}"))?;
+    }
+    window_resize_guard::redraw(&notification)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn close_notification_window(window: WebviewWindow) -> Result<(), String> {
+    ensure_notification_window(&window)?;
+    let region_result = window_resize_guard::set_notification_window_regions(&window, Vec::new());
+    let hide_result = window
+        .hide()
+        .map_err(|error| format!("无法关闭测试通知：{error}"));
+    region_result.and(hide_result)
+}
+
 fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -1909,6 +2360,44 @@ mod tests {
         assert_eq!(detected.name, "sample-dashboard");
         assert_eq!(detected.source, "package.json");
     }
+
+    #[test]
+    fn positions_notification_inside_monitor_work_area() {
+        assert_eq!(
+            notification_window_coordinates(
+                "bottom-right",
+                0,
+                0,
+                1920,
+                1040,
+                1.0,
+                notification_window_height(1),
+            ),
+            Ok((1522, 890))
+        );
+        assert_eq!(
+            notification_window_coordinates(
+                "top-center",
+                -1920,
+                0,
+                1920,
+                1040,
+                1.0,
+                notification_window_height(1),
+            ),
+            Ok((-1159, 0))
+        );
+        assert!(notification_window_coordinates(
+            "center",
+            0,
+            0,
+            1920,
+            1040,
+            1.0,
+            notification_window_height(1),
+        )
+        .is_err());
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1958,10 +2447,19 @@ pub fn run() {
             set_resize_paint_color,
             check_preview_update,
             install_preview_update,
+            show_desktop_notification,
+            show_test_notification,
+            notification_window_ready,
+            notification_received,
+            set_notification_hit_regions,
+            redraw_notification_window,
+            resize_notification_window,
+            close_notification_window,
         ])
         .setup(|app| {
             setup_log_dispatcher(app)?;
             setup_tray(app)?;
+            let _ = build_notification_window(app.handle(), "light", "bottom-right", true);
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut store = match load_store(&app_handle) {
@@ -1977,17 +2475,16 @@ pub fn run() {
                         return;
                     }
                 }
-                if let Ok(runtime) = mcp_server::start(
-                    app_handle.clone(),
-                    store.mcp.port,
-                    store.mcp.token.clone(),
-                )
-                .await
+                if let Ok(runtime) =
+                    mcp_server::start(app_handle.clone(), store.mcp.port, store.mcp.token.clone())
+                        .await
                 {
                     if let Ok(mut mcp) = app_handle.state::<AppState>().mcp.lock() {
                         mcp.replace(runtime);
                     }
-                    if let Ok(status) = mcp_server_status(&app_handle, app_handle.state::<AppState>().inner()) {
+                    if let Ok(status) =
+                        mcp_server_status(&app_handle, app_handle.state::<AppState>().inner())
+                    {
                         let _ = app_handle.emit("mcp-server-status", status);
                     }
                 }

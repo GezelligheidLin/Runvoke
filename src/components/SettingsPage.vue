@@ -3,11 +3,11 @@ import { onBeforeUnmount, onMounted, ref, useTemplateRef } from 'vue'
 import CursorIcon from './CursorIcon.vue'
 import ResizableSplitPane from './ResizableSplitPane.vue'
 import vscodeIcon from '../assets/vscode.svg'
-import type { McpServerStatus, ProjectImportSource } from '../types'
+import type { McpServerStatus, NotificationPosition, ProjectImportSource } from '../types'
 
 type Theme = 'light' | 'dark'
 type LogLinkAction = 'open' | 'copy'
-type SettingsSection = 'general' | 'behavior' | 'updates' | 'project-config' | 'mcp'
+type SettingsSection = 'general' | 'behavior' | 'updates' | 'project-config' | 'mcp' | 'test'
 
 defineProps<{
   autostartEnabled: boolean
@@ -29,6 +29,9 @@ defineProps<{
   mcpStatus: McpServerStatus | null
   mcpBusy: boolean
   mcpConfigText: string
+  notificationPosition: NotificationPosition
+  notificationStackingEnabled: boolean
+  notificationTesting: boolean
 }>()
 
 const emit = defineEmits<{
@@ -45,6 +48,9 @@ const emit = defineEmits<{
   openProjectImport: []
   setMcpEnabled: [enabled: boolean]
   copyMcpConfig: []
+  setNotificationPosition: [position: NotificationPosition]
+  setNotificationStackingEnabled: [enabled: boolean]
+  testNotification: []
 }>()
 
 const activeSection = ref<SettingsSection>('general')
@@ -53,6 +59,14 @@ const projectImportSelect = useTemplateRef<HTMLElement>('projectImportSelect')
 const projectImportTrigger = useTemplateRef<HTMLButtonElement>('projectImportTrigger')
 const projectImportMenu = useTemplateRef<HTMLElement>('projectImportMenu')
 const projectImportMenuPosition = ref({ top: 0, left: 0, width: 208 })
+const notificationPositions: Array<{ value: NotificationPosition, label: string }> = [
+  { value: 'top-left', label: '左上' },
+  { value: 'top-center', label: '中上' },
+  { value: 'top-right', label: '右上' },
+  { value: 'bottom-left', label: '左下' },
+  { value: 'bottom-center', label: '中下' },
+  { value: 'bottom-right', label: '右下' },
+]
 
 function navigateTo(section: SettingsSection) {
   activeSection.value = section
@@ -324,7 +338,7 @@ onBeforeUnmount(() => {
           </div>
           </section>
 
-          <section v-else class="settings-section settings-mcp-section">
+          <section v-else-if="activeSection === 'mcp'" class="settings-section settings-mcp-section">
           <div class="settings-list">
             <article class="settings-item settings-mcp-toggle">
               <div>
@@ -372,6 +386,57 @@ onBeforeUnmount(() => {
                 <div><dt>端口</dt><dd><code>{{ mcpStatus.port }}</code></dd></div>
                 <div><dt>MCP 端点</dt><dd><code>{{ mcpStatus.endpoint }}</code></dd></div>
               </dl>
+            </article>
+          </div>
+          </section>
+
+          <section v-else class="settings-section settings-test-section">
+          <div class="settings-list">
+            <article class="settings-item settings-notification-position-item">
+              <div>
+                <strong>通知显示位置</strong>
+                <p>选择测试通知在当前显示器工作区中的停靠位置，设置会保存在本机。</p>
+              </div>
+              <div class="notification-position-picker" role="radiogroup" aria-label="通知显示位置">
+                <button
+                  v-for="position in notificationPositions"
+                  :key="position.value"
+                  type="button"
+                  role="radio"
+                  :aria-checked="notificationPosition === position.value"
+                  :class="{ active: notificationPosition === position.value }"
+                  @click="emit('setNotificationPosition', position.value)"
+                >
+                  <i :class="position.value" aria-hidden="true"><span /></i>
+                  <span>{{ position.label }}</span>
+                </button>
+              </div>
+            </article>
+
+            <article class="settings-item">
+              <div>
+                <strong>通知堆叠</strong>
+                <p>多条通知默认叠放显示，点击最上层通知可展开或收起；关闭后保持逐条排列。</p>
+              </div>
+              <button
+                class="settings-switch"
+                :class="{ active: notificationStackingEnabled }"
+                type="button"
+                role="switch"
+                :aria-checked="notificationStackingEnabled"
+                :aria-label="notificationStackingEnabled ? '关闭通知堆叠' : '开启通知堆叠'"
+                @click="emit('setNotificationStackingEnabled', !notificationStackingEnabled)"
+              ><i /></button>
+            </article>
+
+            <article class="settings-item">
+              <div>
+                <strong>桌面通知预览</strong>
+                <p>显示一条不占任务栏、不抢焦点的透明置顶通知，并自动适配当前界面主题。</p>
+              </div>
+              <button class="settings-primary-button" type="button" :disabled="notificationTesting" @click="emit('testNotification')">
+                {{ notificationTesting ? '正在显示' : '显示测试通知' }}
+              </button>
             </article>
           </div>
           </section>

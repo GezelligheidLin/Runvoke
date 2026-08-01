@@ -15,9 +15,9 @@ import AgentProjectImportDialog from './components/AgentProjectImportDialog.vue'
 import ProjectImportDialog from './components/ProjectImportDialog.vue'
 import ResizableSplitPane from './components/ResizableSplitPane.vue'
 import SettingsPage from './components/SettingsPage.vue'
-import { TooltipProvider } from './components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
 import { useLauncher } from './composables/useLauncher'
-import type { ImportedProject, LogStream, McpServerStatus, ProjectConfig, ProjectGroup, ProjectImportSource, ProjectTask, RuntimeStatus } from './types'
+import type { ImportedProject, LogStream, McpServerStatus, NotificationPosition, ProjectConfig, ProjectGroup, ProjectImportSource, ProjectTask, RuntimeStatus } from './types'
 
 const {
   projects,
@@ -48,7 +48,9 @@ const {
   setAutostart,
   clearLogs,
   refreshWorkspace,
-} = useLauncher()
+} = useLauncher({
+  onRuntimeStatusChanged: reportRuntimeStatusChange,
+})
 
 const search = ref('')
 const formOpen = ref(false)
@@ -71,6 +73,8 @@ const theme = ref<Theme>(readTheme())
 const logLinkAction = ref<LogLinkAction>(readLogLinkAction())
 const githubLinkVisible = ref(readGithubLinkVisible())
 const previewUpdatesEnabled = ref(readPreviewUpdatesEnabled())
+const notificationPosition = ref<NotificationPosition>(readNotificationPosition())
+const notificationStackingEnabled = ref(readNotificationStackingEnabled())
 const saving = ref(false)
 const busyAction = ref('')
 const temporaryCommand = ref('')
@@ -90,6 +94,7 @@ const availableUpdate = shallowRef<AvailableUpdate | null>(null)
 const updatePopoverOpen = ref(false)
 const updateChecking = ref(false)
 const updateInstalling = ref(false)
+const notificationTesting = ref(false)
 const projectConfigOpening = ref(false)
 const projectImportSource = ref<ProjectImportSource>('vscode')
 const importPromptOpen = ref(false)
@@ -155,6 +160,8 @@ let mcpWorkspaceRefreshTimer: number | undefined
 let projectContextSubmenuCloseTimer: number | undefined
 let scrollbarUpdateFrame: number | undefined
 const updateCheckInterval = 30 * 60 * 1_000
+const intentionallyStoppedRunIds = new Set<string>()
+const notifiedRunIds = new Set<string>()
 
 function readTheme(): Theme {
   try {
@@ -195,6 +202,33 @@ function readGithubLinkVisible() {
 function readPreviewUpdatesEnabled() {
   try {
     return window.localStorage.getItem('runvoke-preview-updates-enabled') === 'true'
+  }
+  catch {
+    return false
+  }
+}
+
+function readNotificationPosition(): NotificationPosition {
+  const positions: NotificationPosition[] = [
+    'top-left',
+    'top-center',
+    'top-right',
+    'bottom-left',
+    'bottom-center',
+    'bottom-right',
+  ]
+  try {
+    const value = window.localStorage.getItem('runvoke-notification-position') as NotificationPosition | null
+    return value && positions.includes(value) ? value : 'bottom-right'
+  }
+  catch {
+    return 'bottom-right'
+  }
+}
+
+function readNotificationStackingEnabled() {
+  try {
+    return window.localStorage.getItem('runvoke-notification-stacking-enabled') === 'true'
   }
   catch {
     return false
@@ -260,6 +294,24 @@ watch(previewUpdatesEnabled, (enabled) => {
   if (!enabled && availableUpdate.value?.channel === 'preview')
     availableUpdate.value = null
   void checkForUpdate()
+})
+
+watch(notificationPosition, (position) => {
+  try {
+    window.localStorage.setItem('runvoke-notification-position', position)
+  }
+  catch {
+    // Notification position persistence is optional when storage is unavailable.
+  }
+})
+
+watch(notificationStackingEnabled, (enabled) => {
+  try {
+    window.localStorage.setItem('runvoke-notification-stacking-enabled', String(enabled))
+  }
+  catch {
+    // Notification stacking persistence is optional when storage is unavailable.
+  }
 })
 
 type LogSegment = {
@@ -454,6 +506,104 @@ onBeforeUnmount(() => {
   mcpUnlisteners = []
 })
 
+async function isAppInBackground() {
+  if (!isTauri())
+    return document.visibilityState !== 'visible'
+  try {
+    const window = getCurrentWindow()
+    const [focused, minimized] = await Promise.all([window.isFocused(), window.isMinimized()])
+    return !focused || minimized
+  }
+  catch {
+    return document.visibilityState !== 'visible'
+  }
+}
+
+async function showRuntimeDesktopNotification(
+  tone: 'success' | 'error',
+  title: string,
+  message: string,
+  meta: string,
+  runId: string,
+) {
+  if (!isTauri() || !(await isAppInBackground()))
+    return
+  await invoke('show_desktop_notification', {
+    position: 'bottom-right',
+    theme: theme.value,
+    stackingEnabled: notificationStackingEnabled.value,
+    tone,
+    title,
+    message,
+    meta,
+    dedupeKey: runId,
+  }).catch(() => {})
+}
+
+function projectNameForRun(run: RuntimeStatus) {
+  return projects.value.find(project => project.id === run.projectId)?.name ?? '项目'
+}
+
+function markRunNotification(runId: string) {
+  if (notifiedRunIds.has(runId))
+    return false
+  notifiedRunIds.add(runId)
+  if (notifiedRunIds.size > 1_000) {
+    const oldestRunId = notifiedRunIds.values().next().value
+    if (oldestRunId)
+      notifiedRunIds.delete(oldestRunId)
+  }
+  return true
+}
+
+function reportRuntimeStatusChange(run: RuntimeStatus, previous: RuntimeStatus) {
+  if (run.state === 'stopped' && intentionallyStoppedRunIds.delete(run.runId))
+    return
+  const hasEnded = run.state === 'succeeded'
+    || run.state === 'failed'
+    || (run.state === 'stopped' && previous.state !== 'stopping')
+  if (!hasEnded || !markRunNotification(run.runId))
+    return
+  if (run.state === 'succeeded') {
+    void showRuntimeDesktopNotification(
+      'success',
+      `「${run.taskName}」任务已结束`,
+      `项目「${projectNameForRun(run)}」的任务已结束。`,
+      `退出码 ${run.exitCode ?? 0}`,
+      run.runId,
+    )
+  }
+  else if (run.state === 'failed') {
+    void showRuntimeDesktopNotification(
+      'error',
+      `「${run.taskName}」任务已结束`,
+      `项目「${projectNameForRun(run)}」的任务已结束。`,
+      `退出码 ${run.exitCode ?? '未知'}`,
+      run.runId,
+    )
+  }
+  else if (run.state === 'stopped' && previous.state !== 'stopping') {
+    void showRuntimeDesktopNotification(
+      'success',
+      `「${run.taskName}」任务已结束`,
+      `项目「${projectNameForRun(run)}」的任务已结束。`,
+      `退出码 ${run.exitCode ?? 0}`,
+      run.runId,
+    )
+  }
+}
+
+async function stopRunWithoutDesktopNotification(runId: string) {
+  intentionallyStoppedRunIds.add(runId)
+  try {
+    await stopRun(runId)
+  }
+  catch (value) {
+    intentionallyStoppedRunIds.delete(runId)
+    throw value
+  }
+}
+
 async function setupMcpBridge() {
   if (!isTauri())
     return
@@ -564,6 +714,25 @@ async function copyMcpConfig() {
   }
   catch (value) {
     notify('error', `复制 MCP 配置失败：${String(value)}`)
+  }
+}
+
+async function showTestNotification() {
+  if (!isTauri() || notificationTesting.value)
+    return
+  notificationTesting.value = true
+  try {
+    await invoke('show_test_notification', {
+      position: notificationPosition.value,
+      theme: theme.value,
+      stackingEnabled: notificationStackingEnabled.value,
+    })
+  }
+  catch (value) {
+    notify('error', `测试通知显示失败：${String(value)}`)
+  }
+  finally {
+    notificationTesting.value = false
   }
 }
 
@@ -1343,7 +1512,7 @@ async function stopAllActiveRuns() {
     return 0
 
   const runIds = runs.filter(run => run.state !== 'stopping').map(run => run.runId)
-  const results = await Promise.allSettled(runIds.map(runId => stopRun(runId)))
+  const results = await Promise.allSettled(runIds.map(runId => stopRunWithoutDesktopNotification(runId)))
   const failures = results.flatMap(result => result.status === 'rejected' ? [String(result.reason)] : [])
   if (failures.length)
     throw new Error(`${failures.length} 个任务停止失败：${failures[0]}`)
@@ -1408,7 +1577,7 @@ function confirmStopRun(event: MouseEvent, run: RuntimeStatus) {
     event,
     `确定停止「${run.taskName}」吗？相关子进程也会被停止。`,
     '停止任务',
-    () => perform(`stop-${run.runId}`, () => stopRun(run.runId), '任务已停止'),
+    () => perform(`stop-${run.runId}`, () => stopRunWithoutDesktopNotification(run.runId), '任务已停止'),
   )
 }
 
@@ -1642,18 +1811,21 @@ function stateLabel(state?: string) {
       <footer class="sidebar-footer">
         <span class="tray-dot" />
         <OverflowTooltip :text="'应用将在系统托盘中保持运行'">应用将在系统托盘中保持运行</OverflowTooltip>
-        <button
-          v-if="githubLinkVisible"
-          class="github-link-button"
-          type="button"
-          aria-label="在默认浏览器中打开 Runvoke GitHub 仓库"
-          title="打开 GitHub 仓库"
-          @click="openRepository"
-        >
-          <svg aria-hidden="true" viewBox="0 0 16 16" focusable="false">
-            <path d="M8 1.1a6.9 6.9 0 0 0-2.18 13.45c.35.06.48-.15.48-.34v-1.2c-1.95.42-2.36-.83-2.36-.83-.32-.81-.79-1.03-.79-1.03-.65-.44.05-.43.05-.43.72.05 1.1.74 1.1.74.64 1.1 1.68.78 2.08.6.06-.46.25-.78.46-.96-1.56-.18-3.2-.78-3.2-3.47 0-.77.27-1.4.73-1.89-.07-.18-.32-.9.07-1.87 0 0 .6-.19 1.96.72A6.7 6.7 0 0 1 8 3.62c.55 0 1.1.07 1.61.22 1.36-.91 1.96-.72 1.96-.72.39.97.14 1.69.07 1.87.46.49.73 1.12.73 1.89 0 2.7-1.65 3.29-3.22 3.46.25.22.48.65.48 1.31v1.94c0 .19.13.4.49.34A6.9 6.9 0 0 0 8 1.1Z" />
-          </svg>
-        </button>
+        <Tooltip v-if="githubLinkVisible">
+          <TooltipTrigger as-child>
+            <button
+              class="github-link-button"
+              type="button"
+              aria-label="在默认浏览器中打开 Runvoke GitHub 仓库"
+              @click="openRepository"
+            >
+              <svg aria-hidden="true" viewBox="0 0 16 16" focusable="false">
+                <path d="M8 1.1a6.9 6.9 0 0 0-2.18 13.45c.35.06.48-.15.48-.34v-1.2c-1.95.42-2.36-.83-2.36-.83-.32-.81-.79-1.03-.79-1.03-.65-.44.05-.43.05-.43.72.05 1.1.74 1.1.74.64 1.1 1.68.78 2.08.6.06-.46.25-.78.46-.96-1.56-.18-3.2-.78-3.2-3.47 0-.77.27-1.4.73-1.89-.07-.18-.32-.9.07-1.87 0 0 .6-.19 1.96.72A6.7 6.7 0 0 1 8 3.62c.55 0 1.1.07 1.61.22 1.36-.91 1.96-.72 1.96-.72.39.97.14 1.69.07 1.87.46.49.73 1.12.73 1.89 0 2.7-1.65 3.29-3.22 3.46.25.22.48.65.48 1.31v1.94c0 .19.13.4.49.34A6.9 6.9 0 0 0 8 1.1Z" />
+              </svg>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent class="app-tooltip-content" side="top" :side-offset="6">打开 GitHub 仓库</TooltipContent>
+        </Tooltip>
         <button
           v-if="availableUpdate"
           class="update-trigger"
@@ -1703,6 +1875,9 @@ function stateLabel(state?: string) {
         :mcp-status="mcpStatus"
         :mcp-busy="mcpBusy"
         :mcp-config-text="mcpConfigText()"
+        :notification-position="notificationPosition"
+        :notification-stacking-enabled="notificationStackingEnabled"
+        :notification-testing="notificationTesting"
         @close="settingsOpen = false"
         @toggle-autostart="toggleAutostart"
         @set-theme="theme = $event"
@@ -1716,6 +1891,9 @@ function stateLabel(state?: string) {
         @open-project-import="openProjectImportDialog"
         @set-mcp-enabled="setMcpServerEnabled"
         @copy-mcp-config="copyMcpConfig"
+        @set-notification-position="notificationPosition = $event"
+        @set-notification-stacking-enabled="notificationStackingEnabled = $event"
+        @test-notification="showTestNotification"
       />
 
       <template v-else-if="selectedProject">

@@ -29,6 +29,14 @@ export interface ImportedProject {
 
 export type ProjectImportSource = 'vscode' | 'cursor'
 
+export type NotificationPosition =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right'
+
 export interface McpServerStatus {
   enabled: boolean
   running: boolean

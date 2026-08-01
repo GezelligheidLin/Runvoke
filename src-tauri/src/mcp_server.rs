@@ -1,20 +1,20 @@
 use std::{collections::HashSet, net::Ipv4Addr, path::Path, sync::Arc};
 
 use axum::{
-    Json, Router,
     extract::{Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::post,
+    Json, Router,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    AppState, LogEvent, ProjectConfig, ProjectGroup, ProjectTask, RuntimeStatus, load_store,
-    run_task, run_temporary_command, save_project, save_project_group, stop_run,
+    load_store, run_task, run_temporary_command, save_project, save_project_group, stop_run,
+    AppState, LogEvent, ProjectConfig, ProjectGroup, ProjectTask, RuntimeStatus,
 };
 
 #[derive(Clone)]
@@ -33,7 +33,11 @@ impl McpServerRuntime {
     }
 }
 
-pub(crate) async fn start(app: AppHandle, port: u16, token: String) -> Result<McpServerRuntime, String> {
+pub(crate) async fn start(
+    app: AppHandle,
+    port: u16,
+    token: String,
+) -> Result<McpServerRuntime, String> {
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
         .await
         .map_err(|error| format!("无法启动本地 MCP 服务（端口 {port}）：{error}"))?;
@@ -77,7 +81,10 @@ async fn authorize(State(state): State<McpHttpState>, request: Request, next: Ne
 
 async fn handle_request(State(state): State<McpHttpState>, Json(request): Json<Value>) -> Response {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
-    let method = request.get("method").and_then(Value::as_str).unwrap_or_default();
+    let method = request
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
 
     if method == "notifications/initialized" || method.starts_with("notifications/") {
@@ -94,7 +101,17 @@ async fn handle_request(State(state): State<McpHttpState>, Json(request): Json<V
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
         "tools/call" => match params.get("name").and_then(Value::as_str) {
-            Some(name) => Ok(tool_response(dispatch_tool(&state, name, params.get("arguments").cloned().unwrap_or_else(|| json!({}))).await)),
+            Some(name) => Ok(tool_response(
+                dispatch_tool(
+                    &state,
+                    name,
+                    params
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                )
+                .await,
+            )),
             None => Err("tools/call 缺少工具名称".into()),
         },
         _ => return json_error(id, -32601, "未支持的 MCP 方法"),
@@ -111,7 +128,10 @@ fn json_result(id: Value, result: Value) -> Response {
 }
 
 fn json_error(id: Value, code: i32, message: impl Into<String>) -> Response {
-    Json(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })).into_response()
+    Json(
+        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } }),
+    )
+    .into_response()
 }
 
 fn tool_response(result: Result<Value, String>) -> Value {
@@ -160,8 +180,18 @@ async fn dispatch_tool(state: &McpHttpState, name: &str, args: Value) -> Result<
         "stop_all_runs" => stop_all_runs(state).await,
         "request_project_import" => request_project_import(state, &args),
         "update_settings" => update_settings(state, &args),
-        "check_updates" => emit_ui_request(state, "mcp-check-updates", json!({}), "已请求 Runvoke 检查更新"),
-        "request_install_update" => emit_ui_request(state, "mcp-install-update", json!({}), "已请求在 Runvoke 中确认安装更新"),
+        "check_updates" => emit_ui_request(
+            state,
+            "mcp-check-updates",
+            json!({}),
+            "已请求 Runvoke 检查更新",
+        ),
+        "request_install_update" => emit_ui_request(
+            state,
+            "mcp-install-update",
+            json!({}),
+            "已请求在 Runvoke 中确认安装更新",
+        ),
         _ => Err("未支持的工具".into()),
     }
 }
@@ -171,7 +201,9 @@ fn list_projects(state: &McpHttpState) -> Result<Value, String> {
     for project in &mut store.projects {
         super::normalize_project(project);
     }
-    Ok(Value::Array(store.projects.iter().map(project_summary).collect()))
+    Ok(Value::Array(
+        store.projects.iter().map(project_summary).collect(),
+    ))
 }
 
 fn project_summary(project: &ProjectConfig) -> Value {
@@ -193,7 +225,13 @@ fn list_groups(state: &McpHttpState) -> Result<Value, String> {
 
 fn active_runs(state: &McpHttpState) -> Result<Vec<RuntimeStatus>, String> {
     let app_state = state.app.state::<AppState>();
-    let mut runs = app_state.runs.lock().map_err(|_| "进程状态锁已损坏")?.values().cloned().collect::<Vec<_>>();
+    let mut runs = app_state
+        .runs
+        .lock()
+        .map_err(|_| "进程状态锁已损坏")?
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
     runs.sort_by_key(|status| std::cmp::Reverse(status.started_at.unwrap_or_default()));
     Ok(runs)
 }
@@ -235,19 +273,34 @@ fn redact_log_entry(entry: &LogEvent, secrets: &[String]) -> LogEvent {
 fn save_project_from_mcp(state: &McpHttpState, args: &Value) -> Result<Value, String> {
     let id = required_string(args, "id")?.to_owned();
     let store = load_store(&state.app)?;
-    let existing = store.projects.iter().find(|project| project.id == id).cloned();
+    let existing = store
+        .projects
+        .iter()
+        .find(|project| project.id == id)
+        .cloned();
     let Some(existing) = existing else {
         return Err("项目不存在；请使用 request_project_import 请求用户筛选导入".into());
     };
-    let tasks = args.get("tasks").map(|value| serde_json::from_value::<Vec<ProjectTask>>(value.clone()).map_err(|error| format!("任务参数无效：{error}"))).transpose()?.unwrap_or_else(|| existing.tasks.clone());
-    let group_id = optional_nullable_string(args, "groupId").unwrap_or_else(|| existing.group_id.clone());
+    let tasks = args
+        .get("tasks")
+        .map(|value| {
+            serde_json::from_value::<Vec<ProjectTask>>(value.clone())
+                .map_err(|error| format!("任务参数无效：{error}"))
+        })
+        .transpose()?
+        .unwrap_or_else(|| existing.tasks.clone());
+    let group_id =
+        optional_nullable_string(args, "groupId").unwrap_or_else(|| existing.group_id.clone());
     let port = optional_nullable_u16(args, "port").unwrap_or(existing.port);
     let project = ProjectConfig {
         id,
         name: required_string(args, "name")?.to_owned(),
         directory: required_string(args, "directory")?.to_owned(),
         group_id,
-        command: tasks.first().map(|task| task.command.clone()).unwrap_or_default(),
+        command: tasks
+            .first()
+            .map(|task| task.command.clone())
+            .unwrap_or_default(),
         env: existing.env,
         port,
         tasks,
@@ -259,11 +312,22 @@ fn save_project_from_mcp(state: &McpHttpState, args: &Value) -> Result<Value, St
 
 fn save_group_from_mcp(state: &McpHttpState, args: &Value) -> Result<Value, String> {
     let id = optional_string(args, "id").unwrap_or_default();
-    let existing = (!id.is_empty()).then(|| load_store(&state.app).ok()?.groups.into_iter().find(|group| group.id == id)).flatten();
+    let existing = (!id.is_empty())
+        .then(|| {
+            load_store(&state.app)
+                .ok()?
+                .groups
+                .into_iter()
+                .find(|group| group.id == id)
+        })
+        .flatten();
     let group = ProjectGroup {
         id,
         name: required_string(args, "name")?.to_owned(),
-        collapsed: args.get("collapsed").and_then(Value::as_bool).unwrap_or_else(|| existing.as_ref().is_some_and(|group| group.collapsed)),
+        collapsed: args
+            .get("collapsed")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| existing.as_ref().is_some_and(|group| group.collapsed)),
     };
     let saved = save_project_group(state.app.clone(), group)?;
     notify_workspace_changed(state);
@@ -280,22 +344,40 @@ fn move_project_from_mcp(state: &McpHttpState, args: &Value) -> Result<Value, St
 }
 
 async fn start_project_task(state: &McpHttpState, args: &Value) -> Result<Value, String> {
-    let result = run_task(state.app.clone(), required_string(args, "projectId")?.to_owned(), required_string(args, "taskId")?.to_owned()).await?;
+    let result = run_task(
+        state.app.clone(),
+        required_string(args, "projectId")?.to_owned(),
+        required_string(args, "taskId")?.to_owned(),
+    )
+    .await?;
     serde_json::to_value(result).map_err(|error| error.to_string())
 }
 
 async fn run_project_command(state: &McpHttpState, args: &Value) -> Result<Value, String> {
-    let result = run_temporary_command(state.app.clone(), required_string(args, "projectId")?.to_owned(), required_string(args, "command")?.to_owned()).await?;
+    let result = run_temporary_command(
+        state.app.clone(),
+        required_string(args, "projectId")?.to_owned(),
+        required_string(args, "command")?.to_owned(),
+    )
+    .await?;
     serde_json::to_value(result).map_err(|error| error.to_string())
 }
 
 async fn stop_project_run(state: &McpHttpState, args: &Value) -> Result<Value, String> {
-    let result = stop_run(state.app.clone(), required_string(args, "runId")?.to_owned()).await?;
+    let result = stop_run(
+        state.app.clone(),
+        required_string(args, "runId")?.to_owned(),
+    )
+    .await?;
     serde_json::to_value(result).map_err(|error| error.to_string())
 }
 
 async fn stop_all_runs(state: &McpHttpState) -> Result<Value, String> {
-    let run_ids = active_runs(state)?.into_iter().filter(|run| matches!(run.state.as_str(), "starting" | "running" | "stopping")).map(|run| run.run_id).collect::<Vec<_>>();
+    let run_ids = active_runs(state)?
+        .into_iter()
+        .filter(|run| matches!(run.state.as_str(), "starting" | "running" | "stopping"))
+        .map(|run| run.run_id)
+        .collect::<Vec<_>>();
     let mut stopped = Vec::with_capacity(run_ids.len());
     for run_id in run_ids {
         stopped.push(stop_run(state.app.clone(), run_id).await?);
@@ -314,7 +396,10 @@ fn request_project_import(state: &McpHttpState, args: &Value) -> Result<Value, S
         .iter()
         .filter_map(|project| {
             let name = required_string(project, "name").ok()?.trim().to_owned();
-            let directory = required_string(project, "directory").ok()?.trim().to_owned();
+            let directory = required_string(project, "directory")
+                .ok()?
+                .trim()
+                .to_owned();
             if !Path::new(&directory).is_dir() {
                 return None;
             }
@@ -339,18 +424,36 @@ fn request_project_import(state: &McpHttpState, args: &Value) -> Result<Value, S
     if candidates.is_empty() {
         return Err("候选项目目录无效或已重复；请提供存在的本地目录".into());
     }
-    emit_ui_request(state, "mcp-project-import-request", json!({ "projects": candidates }), "已在 Runvoke 中打开 Agent 项目筛选，请由用户勾选并确认纳入")
+    emit_ui_request(
+        state,
+        "mcp-project-import-request",
+        json!({ "projects": candidates }),
+        "已在 Runvoke 中打开 Agent 项目筛选，请由用户勾选并确认纳入",
+    )
 }
 
 fn update_settings(state: &McpHttpState, args: &Value) -> Result<Value, String> {
     if let Some(enabled) = args.get("autostartEnabled").and_then(Value::as_bool) {
         super::set_autostart_enabled(state.app.clone(), enabled)?;
     }
-    emit_ui_request(state, "mcp-settings-update", args.clone(), "设置更新请求已交给 Runvoke")
+    emit_ui_request(
+        state,
+        "mcp-settings-update",
+        args.clone(),
+        "设置更新请求已交给 Runvoke",
+    )
 }
 
-fn emit_ui_request(state: &McpHttpState, event: &str, payload: Value, message: &str) -> Result<Value, String> {
-    state.app.emit(event, payload).map_err(|error| error.to_string())?;
+fn emit_ui_request(
+    state: &McpHttpState,
+    event: &str,
+    payload: Value,
+    message: &str,
+) -> Result<Value, String> {
+    state
+        .app
+        .emit(event, payload)
+        .map_err(|error| error.to_string())?;
     Ok(json!({ "accepted": true, "message": message }))
 }
 
@@ -359,15 +462,22 @@ fn notify_workspace_changed(state: &McpHttpState) {
 }
 
 fn required_string<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
-    args.get(name).and_then(Value::as_str).filter(|value| !value.trim().is_empty()).ok_or_else(|| format!("缺少参数 {name}"))
+    args.get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("缺少参数 {name}"))
 }
 
 fn optional_string(args: &Value, name: &str) -> Option<String> {
-    args.get(name).and_then(Value::as_str).map(str::to_owned).filter(|value| !value.trim().is_empty())
+    args.get(name)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn optional_nullable_string(args: &Value, name: &str) -> Option<Option<String>> {
-    args.get(name).map(|value| value.as_str().map(str::to_owned))
+    args.get(name)
+        .map(|value| value.as_str().map(str::to_owned))
 }
 
 fn optional_u64(args: &Value, name: &str) -> Option<u64> {
@@ -375,7 +485,8 @@ fn optional_u64(args: &Value, name: &str) -> Option<u64> {
 }
 
 fn optional_nullable_u16(args: &Value, name: &str) -> Option<Option<u16>> {
-    args.get(name).map(|value| value.as_u64().and_then(|value| u16::try_from(value).ok()))
+    args.get(name)
+        .map(|value| value.as_u64().and_then(|value| u16::try_from(value).ok()))
 }
 
 #[cfg(test)]
@@ -418,7 +529,9 @@ mod tests {
             .expect("导入工具应声明必填字段");
 
         assert!(required.iter().any(|value| value == "projects"));
-        assert!(import_tool.pointer("/inputSchema/properties/source").is_none());
+        assert!(import_tool
+            .pointer("/inputSchema/properties/source")
+            .is_none());
     }
 
     #[test]
@@ -432,6 +545,9 @@ mod tests {
             mode: "append".into(),
         };
 
-        assert_eq!(redact_log_entry(&entry, &["secret-value".into()]).message, "token=***");
+        assert_eq!(
+            redact_log_entry(&entry, &["secret-value".into()]).message,
+            "token=***"
+        );
     }
 }

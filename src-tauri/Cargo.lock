@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "runvoke"
-version = "0.1.13-dev.1"
+version = "0.1.13"
 dependencies = [
  "axum",
  "serde",
