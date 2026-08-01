@@ -10,6 +10,10 @@ const LOG_MESSAGE_LIMIT = 16_000
 type LogMode = 'append' | 'progress' | 'finish'
 type IncomingLog = Omit<LogEntry, 'id' | 'transient'> & { mode?: LogMode }
 
+interface LauncherOptions {
+  onRuntimeStatusChanged?: (status: RuntimeStatus, previous: RuntimeStatus) => void
+}
+
 function stripTerminalControlSequences(message: string) {
   const stripped = message
     .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, '')
@@ -23,7 +27,7 @@ function isReplaceableProgress(message: string) {
   return /\[webpack\.Progress\]\s+\d{1,3}%(?:\s|$)/i.test(message)
 }
 
-export function useLauncher() {
+export function useLauncher(options: LauncherOptions = {}) {
   const projects = ref<ProjectConfig[]>([])
   const projectGroups = ref<ProjectGroup[]>([])
   const runsById = ref<Record<string, RuntimeStatus>>({})
@@ -58,8 +62,13 @@ export function useLauncher() {
     error.value = value instanceof Error ? value.message : String(value)
   }
 
-  function updateRun(status: RuntimeStatus) {
+  function updateRun(status: RuntimeStatus, announce = true) {
+    const previous = runsById.value[status.runId]
     runsById.value = { ...runsById.value, [status.runId]: status }
+    if (!announce)
+      return
+    if (previous && previous.state !== status.state)
+      options.onRuntimeStatusChanged?.(status, previous)
   }
 
   function appendLogs(payloads: IncomingLog[]) {
@@ -136,9 +145,21 @@ export function useLauncher() {
     projectGroups.value = await invoke<ProjectGroup[]>('list_project_groups')
   }
 
-  async function refreshRuntime() {
+  async function refreshWorkspace() {
+    await Promise.all([refreshProjects(), refreshProjectGroups()])
+  }
+
+  async function refreshRuntime(announce = false) {
     const statuses = await invoke<RuntimeStatus[]>('list_runtime_status')
+    const previousRuns = runsById.value
     runsById.value = Object.fromEntries(statuses.map((status) => [status.runId, status]))
+    if (!announce)
+      return
+    for (const status of statuses) {
+      const previous = previousRuns[status.runId]
+      if (previous && previous.state !== status.state)
+        options.onRuntimeStatusChanged?.(status, previous)
+    }
   }
 
   async function initialize() {
@@ -150,12 +171,11 @@ export function useLauncher() {
         await listen<RuntimeStatus>('project-status', ({ payload }) => updateRun(payload)),
       )
       await Promise.all([
-        refreshProjects(),
-        refreshProjectGroups(),
+        refreshWorkspace(),
         refreshRuntime(),
         invoke<boolean>('get_autostart_enabled').then((enabled) => { autostartEnabled.value = enabled }),
       ])
-      pollTimer = setInterval(() => void refreshRuntime().catch(reportError), 1_500)
+      pollTimer = setInterval(() => void refreshRuntime(true).catch(reportError), 1_500)
       clockTimer = setInterval(() => { now.value = Date.now() }, 1_000)
     }
     catch (value) { reportError(value) }
@@ -321,6 +341,6 @@ export function useLauncher() {
   return {
     projects, projectGroups, selectedId, selectedProject, selectedRunId, selectedRun, selectedLogs, projectRuns, runsById,
     loading, error, autostartEnabled, saveProject, reorderProjects, saveProjectGroup, removeProjectGroup, setProjectGroupCollapsed, moveProject, removeProject, runTask, runTemporaryCommand, stopRun, dismissRun, dismissInactiveRuns,
-    openInVscode, openInFileManager, setAutostart, clearLogs, formatUptime,
+    openInVscode, openInFileManager, setAutostart, clearLogs, formatUptime, refreshWorkspace,
   }
 }

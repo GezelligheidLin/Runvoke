@@ -73,6 +73,11 @@ jobs:
         run: |
           $version = node -p "require('./package.json').version"
           $releaseNotes = (Get-Content 'RELEASE_NOTES.md' -Raw).Trim()
+          $isPreRelease = '${{ contains(github.ref_name, '-') }}' -eq 'true'
+          $manifestName = if ($isPreRelease) { 'latest-prerelease.json' } else { 'latest.json' }
+          if ($isPreRelease) {
+            $releaseNotes = "预览版本：可能包含未完成或不稳定的功能，建议仅用于体验新功能。`n`n$releaseNotes"
+          }
           $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis' -Filter '*.exe' | Select-Object -First 1
           if (-not $installer) { throw 'NSIS installer was not generated.' }
           $signaturePath = "$($installer.FullName).sig"
@@ -89,7 +94,7 @@ jobs:
               }
             }
           }
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content 'latest.json' -Encoding utf8
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content $manifestName -Encoding utf8
 
       - name: Upload updater files to Alibaba Cloud OSS
         shell: pwsh
@@ -119,14 +124,16 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Failed to upload $([System.IO.Path]::GetFileName($asset)) to OSS." }
           }
 
-          & $ossutil cp 'latest.json' "oss://$($env:ALIYUN_OSS_BUCKET)/runvoke/latest.json" -f
-          if ($LASTEXITCODE -ne 0) { throw 'Failed to upload latest.json to OSS.' }
+          $isPreRelease = '${{ contains(github.ref_name, '-') }}' -eq 'true'
+          $manifestName = if ($isPreRelease) { 'latest-prerelease.json' } else { 'latest.json' }
+          & $ossutil cp $manifestName "oss://$($env:ALIYUN_OSS_BUCKET)/runvoke/$manifestName" -f
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload $manifestName to OSS." }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.exe.sig
-            latest.json

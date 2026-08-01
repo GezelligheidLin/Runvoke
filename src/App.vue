@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { invoke, isTauri } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater'
@@ -9,11 +10,14 @@ import brandIcon from '../src-tauri/icons/128x128.png'
 import OverflowTooltip from './components/OverflowTooltip.vue'
 import ProjectForm from './components/ProjectForm.vue'
 import ProjectGroupList from './components/ProjectGroupList.vue'
+import ImportPromptDialog from './components/ImportPromptDialog.vue'
+import AgentProjectImportDialog from './components/AgentProjectImportDialog.vue'
+import ProjectImportDialog from './components/ProjectImportDialog.vue'
 import ResizableSplitPane from './components/ResizableSplitPane.vue'
 import SettingsPage from './components/SettingsPage.vue'
-import { TooltipProvider } from './components/ui/tooltip'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
 import { useLauncher } from './composables/useLauncher'
-import type { LogStream, ProjectConfig, ProjectGroup, ProjectTask, RuntimeStatus } from './types'
+import type { ImportedProject, LogStream, McpServerStatus, NotificationPosition, ProjectConfig, ProjectGroup, ProjectImportSource, ProjectTask, RuntimeStatus } from './types'
 
 const {
   projects,
@@ -43,7 +47,10 @@ const {
   openInFileManager,
   setAutostart,
   clearLogs,
-} = useLauncher()
+  refreshWorkspace,
+} = useLauncher({
+  onRuntimeStatusChanged: reportRuntimeStatusChange,
+})
 
 const search = ref('')
 const formOpen = ref(false)
@@ -51,9 +58,23 @@ const editingProject = ref<ProjectConfig | null>(null)
 const settingsOpen = ref(false)
 type Theme = 'light' | 'dark'
 type LogLinkAction = 'open' | 'copy'
+type PreviewUpdate = {
+  version: string
+  body: string
+}
+type PreviewUpdateDownloadProgress = {
+  received: number
+  total?: number
+}
+type AvailableUpdate =
+  | { channel: 'stable', update: Update, version: string, body: string }
+  | { channel: 'preview', version: string, body: string }
 const theme = ref<Theme>(readTheme())
 const logLinkAction = ref<LogLinkAction>(readLogLinkAction())
 const githubLinkVisible = ref(readGithubLinkVisible())
+const previewUpdatesEnabled = ref(readPreviewUpdatesEnabled())
+const notificationPosition = ref<NotificationPosition>(readNotificationPosition())
+const notificationStackingEnabled = ref(readNotificationStackingEnabled())
 const saving = ref(false)
 const busyAction = ref('')
 const temporaryCommand = ref('')
@@ -69,10 +90,23 @@ const logFilter = ref<'all' | LogStream>('all')
 const autoScroll = ref(true)
 const toast = ref<{ type: 'success' | 'error', message: string } | null>(null)
 const appVersion = shallowRef('')
-const availableUpdate = shallowRef<Update | null>(null)
+const availableUpdate = shallowRef<AvailableUpdate | null>(null)
 const updatePopoverOpen = ref(false)
 const updateChecking = ref(false)
 const updateInstalling = ref(false)
+const notificationTesting = ref(false)
+const projectConfigOpening = ref(false)
+const projectImportSource = ref<ProjectImportSource>('vscode')
+const importPromptOpen = ref(false)
+const projectImportDialogOpen = ref(false)
+const projectImportCandidates = ref<ImportedProject[]>([])
+const projectImportLoading = ref(false)
+const projectImporting = ref(false)
+const agentProjectImportDialogOpen = ref(false)
+const agentProjectImportCandidates = ref<ImportedProject[]>([])
+const agentProjectImporting = ref(false)
+const mcpStatus = ref<McpServerStatus | null>(null)
+const mcpBusy = ref(false)
 const updateProgress = ref({ received: 0, total: 0 })
 const logContainer = useTemplateRef<HTMLDivElement>('logContainer')
 const runListContainer = useTemplateRef<HTMLDivElement>('runListContainer')
@@ -121,9 +155,13 @@ const projectContextMenu = ref<ProjectContextMenu | null>(null)
 const projectContextSubmenuOpen = ref(false)
 let toastTimer: number | undefined
 let updateCheckTimer: number | undefined
+let mcpUnlisteners: UnlistenFn[] = []
+let mcpWorkspaceRefreshTimer: number | undefined
 let projectContextSubmenuCloseTimer: number | undefined
 let scrollbarUpdateFrame: number | undefined
 const updateCheckInterval = 30 * 60 * 1_000
+const intentionallyStoppedRunIds = new Set<string>()
+const notifiedRunIds = new Set<string>()
 
 function readTheme(): Theme {
   try {
@@ -158,6 +196,42 @@ function readGithubLinkVisible() {
   }
   catch {
     return true
+  }
+}
+
+function readPreviewUpdatesEnabled() {
+  try {
+    return window.localStorage.getItem('runvoke-preview-updates-enabled') === 'true'
+  }
+  catch {
+    return false
+  }
+}
+
+function readNotificationPosition(): NotificationPosition {
+  const positions: NotificationPosition[] = [
+    'top-left',
+    'top-center',
+    'top-right',
+    'bottom-left',
+    'bottom-center',
+    'bottom-right',
+  ]
+  try {
+    const value = window.localStorage.getItem('runvoke-notification-position') as NotificationPosition | null
+    return value && positions.includes(value) ? value : 'bottom-right'
+  }
+  catch {
+    return 'bottom-right'
+  }
+}
+
+function readNotificationStackingEnabled() {
+  try {
+    return window.localStorage.getItem('runvoke-notification-stacking-enabled') === 'true'
+  }
+  catch {
+    return false
   }
 }
 
@@ -207,6 +281,36 @@ watch(githubLinkVisible, (value) => {
   }
   catch {
     // Repository entry visibility is optional when storage is unavailable.
+  }
+})
+
+watch(previewUpdatesEnabled, (enabled) => {
+  try {
+    window.localStorage.setItem('runvoke-preview-updates-enabled', String(enabled))
+  }
+  catch {
+    // Preview update preference persistence is optional when storage is unavailable.
+  }
+  if (!enabled && availableUpdate.value?.channel === 'preview')
+    availableUpdate.value = null
+  void checkForUpdate()
+})
+
+watch(notificationPosition, (position) => {
+  try {
+    window.localStorage.setItem('runvoke-notification-position', position)
+  }
+  catch {
+    // Notification position persistence is optional when storage is unavailable.
+  }
+})
+
+watch(notificationStackingEnabled, (enabled) => {
+  try {
+    window.localStorage.setItem('runvoke-notification-stacking-enabled', String(enabled))
+  }
+  catch {
+    // Notification stacking persistence is optional when storage is unavailable.
   }
 })
 
@@ -375,8 +479,13 @@ onMounted(() => {
   window.addEventListener('resize', scheduleScrollbarUpdate)
   window.addEventListener('contextmenu', preventNativeContextMenu)
   void nextTick(updateScrollbars)
-  if (isTauri())
-    void getVersion().then(version => appVersion.value = version).catch(() => {})
+  if (isTauri()) {
+    void getVersion().then((version) => {
+      appVersion.value = version
+      promptProjectImportAfterUpdate(version)
+    }).catch(() => {})
+  }
+  void setupMcpBridge()
   void checkForUpdate()
   updateCheckTimer = window.setInterval(() => void checkForUpdate(), updateCheckInterval)
 })
@@ -390,7 +499,242 @@ onBeforeUnmount(() => {
     clearInterval(updateCheckTimer)
   if (projectContextSubmenuCloseTimer)
     clearTimeout(projectContextSubmenuCloseTimer)
+  if (mcpWorkspaceRefreshTimer)
+    clearTimeout(mcpWorkspaceRefreshTimer)
+  for (const unlisten of mcpUnlisteners)
+    unlisten()
+  mcpUnlisteners = []
 })
+
+async function isAppInBackground() {
+  if (!isTauri())
+    return document.visibilityState !== 'visible'
+  try {
+    const window = getCurrentWindow()
+    const [focused, minimized] = await Promise.all([window.isFocused(), window.isMinimized()])
+    return !focused || minimized
+  }
+  catch {
+    return document.visibilityState !== 'visible'
+  }
+}
+
+async function showRuntimeDesktopNotification(
+  tone: 'success' | 'error',
+  title: string,
+  message: string,
+  meta: string,
+  runId: string,
+) {
+  if (!isTauri() || !(await isAppInBackground()))
+    return
+  await invoke('show_desktop_notification', {
+    position: 'bottom-right',
+    theme: theme.value,
+    stackingEnabled: notificationStackingEnabled.value,
+    tone,
+    title,
+    message,
+    meta,
+    dedupeKey: runId,
+  }).catch(() => {})
+}
+
+function projectNameForRun(run: RuntimeStatus) {
+  return projects.value.find(project => project.id === run.projectId)?.name ?? '项目'
+}
+
+function markRunNotification(runId: string) {
+  if (notifiedRunIds.has(runId))
+    return false
+  notifiedRunIds.add(runId)
+  if (notifiedRunIds.size > 1_000) {
+    const oldestRunId = notifiedRunIds.values().next().value
+    if (oldestRunId)
+      notifiedRunIds.delete(oldestRunId)
+  }
+  return true
+}
+
+function reportRuntimeStatusChange(run: RuntimeStatus, previous: RuntimeStatus) {
+  if (run.state === 'stopped' && intentionallyStoppedRunIds.delete(run.runId))
+    return
+  const hasEnded = run.state === 'succeeded'
+    || run.state === 'failed'
+    || (run.state === 'stopped' && previous.state !== 'stopping')
+  if (!hasEnded || !markRunNotification(run.runId))
+    return
+  if (run.state === 'succeeded') {
+    void showRuntimeDesktopNotification(
+      'success',
+      `「${run.taskName}」任务已结束`,
+      `项目「${projectNameForRun(run)}」的任务已结束。`,
+      `退出码 ${run.exitCode ?? 0}`,
+      run.runId,
+    )
+  }
+  else if (run.state === 'failed') {
+    void showRuntimeDesktopNotification(
+      'error',
+      `「${run.taskName}」任务已结束`,
+      `项目「${projectNameForRun(run)}」的任务已结束。`,
+      `退出码 ${run.exitCode ?? '未知'}`,
+      run.runId,
+    )
+  }
+  else if (run.state === 'stopped' && previous.state !== 'stopping') {
+    void showRuntimeDesktopNotification(
+      'success',
+      `「${run.taskName}」任务已结束`,
+      `项目「${projectNameForRun(run)}」的任务已结束。`,
+      `退出码 ${run.exitCode ?? 0}`,
+      run.runId,
+    )
+  }
+}
+
+async function stopRunWithoutDesktopNotification(runId: string) {
+  intentionallyStoppedRunIds.add(runId)
+  try {
+    await stopRun(runId)
+  }
+  catch (value) {
+    intentionallyStoppedRunIds.delete(runId)
+    throw value
+  }
+}
+
+async function setupMcpBridge() {
+  if (!isTauri())
+    return
+
+  try {
+    mcpUnlisteners = await Promise.all([
+      listen<McpServerStatus>('mcp-server-status', ({ payload }) => {
+        mcpStatus.value = payload
+      }),
+      listen('mcp-workspace-changed', () => {
+        scheduleMcpWorkspaceRefresh()
+      }),
+      listen<{ projects?: unknown }>('mcp-project-import-request', ({ payload }) => {
+        if (!Array.isArray(payload.projects) || !payload.projects.every(isAgentImportCandidate)) {
+          notify('error', 'MCP 导入请求未提供有效的候选项目')
+          return
+        }
+        openAgentProjectImportDialog(payload.projects)
+      }),
+      listen<Record<string, unknown>>('mcp-settings-update', ({ payload }) => {
+        applyMcpSettings(payload)
+      }),
+      listen('mcp-check-updates', () => {
+        void checkForUpdate(true)
+      }),
+      listen('mcp-install-update', () => {
+        requestInstallAvailableUpdateFromMcp()
+      }),
+      listen<PreviewUpdateDownloadProgress>('preview-update-download-progress', ({ payload }) => {
+        updateProgress.value = {
+          received: payload.received,
+          total: payload.total ?? 0,
+        }
+      }),
+    ])
+    mcpStatus.value = await invoke<McpServerStatus>('get_mcp_server_status')
+  }
+  catch (value) {
+    notify('error', `MCP 服务状态读取失败：${String(value)}`)
+  }
+}
+
+function scheduleMcpWorkspaceRefresh() {
+  if (mcpWorkspaceRefreshTimer)
+    clearTimeout(mcpWorkspaceRefreshTimer)
+  mcpWorkspaceRefreshTimer = window.setTimeout(() => {
+    mcpWorkspaceRefreshTimer = undefined
+    void refreshWorkspace().catch((value) => {
+      notify('error', `同步 MCP 工作区失败：${String(value)}`)
+    })
+  }, 80)
+}
+
+function applyMcpSettings(payload: Record<string, unknown>) {
+  if (payload.theme === 'light' || payload.theme === 'dark')
+    theme.value = payload.theme
+  if (payload.logLinkAction === 'open' || payload.logLinkAction === 'copy')
+    logLinkAction.value = payload.logLinkAction
+  if (typeof payload.githubLinkVisible === 'boolean')
+    githubLinkVisible.value = payload.githubLinkVisible
+  if (typeof payload.autostartEnabled === 'boolean') {
+    autostartEnabled.value = payload.autostartEnabled
+  }
+  notify('success', 'MCP 设置请求已应用')
+}
+
+async function setMcpServerEnabled(enabled: boolean) {
+  if (mcpBusy.value)
+    return
+  mcpBusy.value = true
+  try {
+    mcpStatus.value = await invoke<McpServerStatus>('set_mcp_server_enabled', { enabled })
+    notify('success', enabled ? '本地 MCP 服务已开启' : '本地 MCP 服务已关闭')
+  }
+  catch (value) {
+    notify('error', `切换 MCP 服务失败：${String(value)}`)
+  }
+  finally {
+    mcpBusy.value = false
+  }
+}
+
+function mcpConfigText() {
+  const status = mcpStatus.value
+  if (!status)
+    return ''
+  return JSON.stringify({
+    mcpServers: {
+      runvoke: {
+        type: 'streamable-http',
+        url: status.endpoint,
+        headers: { Authorization: `Bearer ${status.authorizationToken}` },
+      },
+    },
+  }, null, 2)
+}
+
+async function copyMcpConfig() {
+  const config = mcpConfigText()
+  if (!config)
+    return
+  try {
+    if (navigator.clipboard?.writeText)
+      await navigator.clipboard.writeText(config)
+    else
+      copyTextFallback(config)
+    notify('success', 'MCP 配置已复制')
+  }
+  catch (value) {
+    notify('error', `复制 MCP 配置失败：${String(value)}`)
+  }
+}
+
+async function showTestNotification() {
+  if (!isTauri() || notificationTesting.value)
+    return
+  notificationTesting.value = true
+  try {
+    await invoke('show_test_notification', {
+      position: notificationPosition.value,
+      theme: theme.value,
+      stackingEnabled: notificationStackingEnabled.value,
+    })
+  }
+  catch (value) {
+    notify('error', `测试通知显示失败：${String(value)}`)
+  }
+  finally {
+    notificationTesting.value = false
+  }
+}
 
 function preventNativeContextMenu(event: MouseEvent) {
   event.preventDefault()
@@ -405,15 +749,82 @@ function notify(type: 'success' | 'error', message: string) {
   }, 3_200)
 }
 
+function compareVersions(left: string, right: string) {
+  const parse = (version: string) => {
+    const [core, prerelease = ''] = version.replace(/^v/i, '').split('-', 2)
+    return {
+      core: core.split('.').map(part => Number.parseInt(part, 10) || 0),
+      prerelease: prerelease.split('.').filter(Boolean),
+    }
+  }
+  const leftParts = parse(left)
+  const rightParts = parse(right)
+  for (let index = 0; index < Math.max(leftParts.core.length, rightParts.core.length); index += 1) {
+    const difference = (leftParts.core[index] ?? 0) - (rightParts.core[index] ?? 0)
+    if (difference)
+      return difference
+  }
+  if (!leftParts.prerelease.length || !rightParts.prerelease.length)
+    return leftParts.prerelease.length ? -1 : rightParts.prerelease.length ? 1 : 0
+  for (let index = 0; index < Math.max(leftParts.prerelease.length, rightParts.prerelease.length); index += 1) {
+    const leftIdentifier = leftParts.prerelease[index]
+    const rightIdentifier = rightParts.prerelease[index]
+    if (leftIdentifier === undefined)
+      return -1
+    if (rightIdentifier === undefined)
+      return 1
+    if (leftIdentifier === rightIdentifier)
+      continue
+    const leftNumber = Number.parseInt(leftIdentifier, 10)
+    const rightNumber = Number.parseInt(rightIdentifier, 10)
+    const leftIsNumber = String(leftNumber) === leftIdentifier
+    const rightIsNumber = String(rightNumber) === rightIdentifier
+    if (leftIsNumber && rightIsNumber)
+      return leftNumber - rightNumber
+    if (leftIsNumber)
+      return -1
+    if (rightIsNumber)
+      return 1
+    return leftIdentifier.localeCompare(rightIdentifier)
+  }
+  return 0
+}
+
+function stableUpdate(update: Update | null): AvailableUpdate | null {
+  return update
+    ? { channel: 'stable', update, version: update.version, body: update.body ?? '' }
+    : null
+}
+
+function previewUpdate(update: PreviewUpdate | null): AvailableUpdate | null {
+  return update
+    ? { channel: 'preview', version: update.version, body: update.body }
+    : null
+}
+
 async function checkForUpdate(showResult = false) {
   if (!isTauri() || updateInstalling.value || updateChecking.value)
     return
 
   updateChecking.value = true
   try {
-    availableUpdate.value = await check()
+    const stableResult = await check()
+    const stable = stableUpdate(stableResult)
+    let preview: AvailableUpdate | null = null
+    if (previewUpdatesEnabled.value) {
+      try {
+        preview = previewUpdate(await invoke<PreviewUpdate | null>('check_preview_update'))
+      }
+      catch (value) {
+        if (!stable)
+          throw value
+      }
+    }
+    availableUpdate.value = preview && (!stable || compareVersions(preview.version, stable.version) > 0)
+      ? preview
+      : stable
     if (availableUpdate.value && showResult) {
-      notify('success', `发现新版本 v${availableUpdate.value.version}`)
+      notify('success', `${availableUpdate.value.channel === 'preview' ? '发现预览版本' : '发现新版本'} v${availableUpdate.value.version}`)
     }
     else if (!availableUpdate.value && showResult) {
       notify('success', '当前已是最新版本')
@@ -456,7 +867,10 @@ async function installAvailableUpdate() {
   updateProgress.value = { received: 0, total: 0 }
   try {
     await stopAllActiveRuns()
-    await update.downloadAndInstall(trackUpdateDownload)
+    if (update.channel === 'preview')
+      await invoke('install_preview_update')
+    else
+      await update.update.downloadAndInstall(trackUpdateDownload)
     await relaunch()
   }
   catch (value) {
@@ -478,6 +892,176 @@ function openSettingsPage() {
   projectOpenMenuOpen.value = false
   updatePopoverOpen.value = false
   settingsOpen.value = true
+}
+
+function promptProjectImportAfterUpdate(version: string) {
+  try {
+    const storageKey = 'runvoke:last-opened-version'
+    const previousVersion = window.localStorage.getItem(storageKey)
+    window.localStorage.setItem(storageKey, version)
+    if (previousVersion && previousVersion !== version)
+      importPromptOpen.value = true
+  }
+  catch {
+    // The import prompt is optional when local storage is unavailable.
+  }
+}
+
+function normalizeDirectory(directory: string) {
+  return directory.replace(/[\\/]+$/, '').toLocaleLowerCase()
+}
+
+async function loadProjectImportCandidates() {
+  if (!isTauri() || projectImportLoading.value)
+    return
+
+  projectImportLoading.value = true
+  try {
+    const command = projectImportSource.value === 'cursor' ? 'list_cursor_projects' : 'list_vscode_projects'
+    const candidates = await invoke<ImportedProject[]>(command)
+    const existingDirectories = new Set(projects.value.map(project => normalizeDirectory(project.directory)))
+    projectImportCandidates.value = candidates.filter(project => !existingDirectories.has(normalizeDirectory(project.directory)))
+  }
+  catch (value) {
+    projectImportCandidates.value = []
+    const sourceLabel = projectImportSource.value === 'cursor' ? 'Cursor' : 'Visual Studio Code'
+    notify('error', `读取 ${sourceLabel} 项目失败：${String(value)}`)
+  }
+  finally {
+    projectImportLoading.value = false
+  }
+}
+
+function openProjectImportDialog() {
+  importPromptOpen.value = false
+  projectImportDialogOpen.value = true
+  void loadProjectImportCandidates()
+}
+
+function openAgentProjectImportDialog(candidates: ImportedProject[]) {
+  const existingDirectories = new Set(projects.value.map(project => normalizeDirectory(project.directory)))
+  agentProjectImportCandidates.value = candidates.filter(project => !existingDirectories.has(normalizeDirectory(project.directory)))
+  agentProjectImportDialogOpen.value = true
+}
+
+function isAgentImportCandidate(candidate: unknown): candidate is ImportedProject {
+  if (!candidate || typeof candidate !== 'object')
+    return false
+  const value = candidate as Partial<ImportedProject>
+  return typeof value.name === 'string'
+    && Boolean(value.name.trim())
+    && typeof value.directory === 'string'
+    && Boolean(value.directory.trim())
+    && (value.suggestedCommand === null || value.suggestedCommand === undefined || typeof value.suggestedCommand === 'string')
+}
+
+async function importProjects(candidates: ImportedProject[]) {
+  if (projectImporting.value || !candidates.length)
+    return
+
+  projectImporting.value = true
+  let imported = 0
+  let failed = 0
+  try {
+    const existingDirectories = new Set(projects.value.map(project => normalizeDirectory(project.directory)))
+    for (const candidate of candidates) {
+      if (existingDirectories.has(normalizeDirectory(candidate.directory)))
+        continue
+
+      const command = candidate.suggestedCommand || 'pnpm dev'
+      const project: ProjectConfig = {
+        id: '',
+        name: candidate.name,
+        directory: candidate.directory,
+        groupId: null,
+        command,
+        env: [],
+        port: null,
+        tasks: [{ id: '', name: '开发服务器', command, mode: 'service' }],
+      }
+      try {
+        await saveProject(project)
+        existingDirectories.add(normalizeDirectory(candidate.directory))
+        imported += 1
+      }
+      catch {
+        failed += 1
+      }
+    }
+    if (imported) {
+      projectImportDialogOpen.value = false
+      notify('success', failed ? `已导入 ${imported} 个项目，${failed} 个项目未能导入` : `已导入 ${imported} 个项目`)
+    }
+    else {
+      notify('error', failed ? '没有项目导入成功，请检查项目目录和配置' : '所选项目已存在')
+    }
+  }
+  finally {
+    projectImporting.value = false
+  }
+}
+
+async function importAgentProjects(candidates: ImportedProject[]) {
+  if (agentProjectImporting.value || !candidates.length)
+    return
+
+  agentProjectImporting.value = true
+  let imported = 0
+  let failed = 0
+  try {
+    const existingDirectories = new Set(projects.value.map(project => normalizeDirectory(project.directory)))
+    for (const candidate of candidates) {
+      if (existingDirectories.has(normalizeDirectory(candidate.directory)))
+        continue
+
+      const command = candidate.suggestedCommand || 'pnpm dev'
+      const project: ProjectConfig = {
+        id: '',
+        name: candidate.name,
+        directory: candidate.directory,
+        groupId: null,
+        command,
+        env: [],
+        port: null,
+        tasks: [{ id: '', name: '开发服务器', command, mode: 'service' }],
+      }
+      try {
+        await saveProject(project)
+        existingDirectories.add(normalizeDirectory(candidate.directory))
+        imported += 1
+      }
+      catch {
+        failed += 1
+      }
+    }
+    if (imported) {
+      agentProjectImportDialogOpen.value = false
+      notify('success', failed ? `已按确认纳入 ${imported} 个项目，${failed} 个项目未能纳入` : `已按确认纳入 ${imported} 个项目`)
+    }
+    else {
+      notify('error', failed ? '没有项目纳入成功，请检查项目目录和配置' : '所选项目已存在')
+    }
+  }
+  finally {
+    agentProjectImporting.value = false
+  }
+}
+
+async function openProjectConfigDirectory() {
+  if (!isTauri() || projectConfigOpening.value)
+    return
+
+  projectConfigOpening.value = true
+  try {
+    await invoke('open_project_config_directory')
+    notify('success', '已在文件管理器中打开项目配置目录')
+  }
+  catch (value) {
+    notify('error', `打开项目配置目录失败：${String(value)}`)
+  }
+  finally {
+    projectConfigOpening.value = false
+  }
 }
 
 function openEditForm() {
@@ -624,11 +1208,14 @@ function requestInstallAvailableUpdate(event: MouseEvent) {
     return
   }
   const count = runningCount.value
+  const previewNotice = availableUpdate.value?.channel === 'preview'
+    ? '这是预览版本，可能包含未完成或不稳定的功能。'
+    : ''
   requestConfirmation(
     event,
     count
-      ? `安装更新前将停止所有项目当前运行的 ${count} 个任务，并在安装完成后重启 Runvoke。是否继续？`
-      : '安装更新后将重启 Runvoke。当前没有运行中的任务，是否继续？',
+      ? `${previewNotice}安装更新前将停止所有项目当前运行的 ${count} 个任务，并在安装完成后重启 Runvoke。是否继续？`
+      : `${previewNotice}安装更新后将重启 Runvoke。当前没有运行中的任务，是否继续？`,
     count ? '停止全部并更新' : '确认更新',
     installAvailableUpdate,
     'primary',
@@ -734,11 +1321,43 @@ async function perform(label: string, action: () => Promise<unknown>, success: s
   }
 }
 
-async function handleDelete() {
+function handleDelete(event: MouseEvent) {
   const project = selectedProject.value
-  if (!project || !window.confirm(`确定删除“${project.name}”吗？运行中的进程也会被停止。`))
+  if (!project)
     return
-  await perform('delete', () => removeProject(project.id), '项目已删除')
+  requestConfirmation(
+    event,
+    `确定删除“${project.name}”吗？运行中的进程也会被停止。`,
+    '确认删除',
+    () => perform('delete', () => removeProject(project.id), '项目已删除'),
+  )
+}
+
+function requestInstallAvailableUpdateFromMcp() {
+  if (!availableUpdate.value) {
+    notify('error', '当前没有可安装的更新，请先检查更新')
+    return
+  }
+  if (busyAction.value) {
+    notify('error', '请等待当前操作完成后再安装更新')
+    return
+  }
+  const count = runningCount.value
+  const previewNotice = availableUpdate.value?.channel === 'preview'
+    ? '这是预览版本，可能包含未完成或不稳定的功能。'
+    : ''
+  const width = Math.min(280, window.innerWidth - 24)
+  const right = window.innerWidth - 24
+  requestConfirmationAt(
+    { top: window.innerHeight - 68, bottom: window.innerHeight - 34, left: right - 132, right },
+    count
+      ? `${previewNotice}安装更新前将停止所有项目当前运行的 ${count} 个任务，并在安装完成后重启 Runvoke。是否继续？`
+      : `${previewNotice}安装更新后将重启 Runvoke。当前没有运行中的任务，是否继续？`,
+    count ? '停止全部并更新' : '确认更新',
+    installAvailableUpdate,
+    'primary',
+    width,
+  )
 }
 
 function updateScrollbar(container: HTMLElement | null, scrollbar: ScrollbarState) {
@@ -847,8 +1466,19 @@ function requestConfirmation(
     return
 
   const rect = target.getBoundingClientRect()
+  requestConfirmationAt(rect, message, confirmLabel, action, variant)
+}
+
+function requestConfirmationAt(
+  rect: Pick<DOMRect, 'top' | 'bottom' | 'left' | 'right'>,
+  message: string,
+  confirmLabel: string,
+  action: () => Promise<void>,
+  variant: PendingConfirmation['variant'] = 'danger',
+  requestedWidth?: number,
+) {
   const viewportPadding = 12
-  const popoverWidth = Math.min(280, window.innerWidth - viewportPadding * 2)
+  const popoverWidth = requestedWidth ?? Math.min(280, window.innerWidth - viewportPadding * 2)
   const estimatedHeight = 142
   const offset = 8
   const below = rect.bottom + offset
@@ -882,7 +1512,7 @@ async function stopAllActiveRuns() {
     return 0
 
   const runIds = runs.filter(run => run.state !== 'stopping').map(run => run.runId)
-  const results = await Promise.allSettled(runIds.map(runId => stopRun(runId)))
+  const results = await Promise.allSettled(runIds.map(runId => stopRunWithoutDesktopNotification(runId)))
   const failures = results.flatMap(result => result.status === 'rejected' ? [String(result.reason)] : [])
   if (failures.length)
     throw new Error(`${failures.length} 个任务停止失败：${failures[0]}`)
@@ -947,7 +1577,7 @@ function confirmStopRun(event: MouseEvent, run: RuntimeStatus) {
     event,
     `确定停止「${run.taskName}」吗？相关子进程也会被停止。`,
     '停止任务',
-    () => perform(`stop-${run.runId}`, () => stopRun(run.runId), '任务已停止'),
+    () => perform(`stop-${run.runId}`, () => stopRunWithoutDesktopNotification(run.runId), '任务已停止'),
   )
 }
 
@@ -1181,18 +1811,21 @@ function stateLabel(state?: string) {
       <footer class="sidebar-footer">
         <span class="tray-dot" />
         <OverflowTooltip :text="'应用将在系统托盘中保持运行'">应用将在系统托盘中保持运行</OverflowTooltip>
-        <button
-          v-if="githubLinkVisible"
-          class="github-link-button"
-          type="button"
-          aria-label="在默认浏览器中打开 Runvoke GitHub 仓库"
-          title="打开 GitHub 仓库"
-          @click="openRepository"
-        >
-          <svg aria-hidden="true" viewBox="0 0 16 16" focusable="false">
-            <path d="M8 1.1a6.9 6.9 0 0 0-2.18 13.45c.35.06.48-.15.48-.34v-1.2c-1.95.42-2.36-.83-2.36-.83-.32-.81-.79-1.03-.79-1.03-.65-.44.05-.43.05-.43.72.05 1.1.74 1.1.74.64 1.1 1.68.78 2.08.6.06-.46.25-.78.46-.96-1.56-.18-3.2-.78-3.2-3.47 0-.77.27-1.4.73-1.89-.07-.18-.32-.9.07-1.87 0 0 .6-.19 1.96.72A6.7 6.7 0 0 1 8 3.62c.55 0 1.1.07 1.61.22 1.36-.91 1.96-.72 1.96-.72.39.97.14 1.69.07 1.87.46.49.73 1.12.73 1.89 0 2.7-1.65 3.29-3.22 3.46.25.22.48.65.48 1.31v1.94c0 .19.13.4.49.34A6.9 6.9 0 0 0 8 1.1Z" />
-          </svg>
-        </button>
+        <Tooltip v-if="githubLinkVisible">
+          <TooltipTrigger as-child>
+            <button
+              class="github-link-button"
+              type="button"
+              aria-label="在默认浏览器中打开 Runvoke GitHub 仓库"
+              @click="openRepository"
+            >
+              <svg aria-hidden="true" viewBox="0 0 16 16" focusable="false">
+                <path d="M8 1.1a6.9 6.9 0 0 0-2.18 13.45c.35.06.48-.15.48-.34v-1.2c-1.95.42-2.36-.83-2.36-.83-.32-.81-.79-1.03-.79-1.03-.65-.44.05-.43.05-.43.72.05 1.1.74 1.1.74.64 1.1 1.68.78 2.08.6.06-.46.25-.78.46-.96-1.56-.18-3.2-.78-3.2-3.47 0-.77.27-1.4.73-1.89-.07-.18-.32-.9.07-1.87 0 0 .6-.19 1.96.72A6.7 6.7 0 0 1 8 3.62c.55 0 1.1.07 1.61.22 1.36-.91 1.96-.72 1.96-.72.39.97.14 1.69.07 1.87.46.49.73 1.12.73 1.89 0 2.7-1.65 3.29-3.22 3.46.25.22.48.65.48 1.31v1.94c0 .19.13.4.49.34A6.9 6.9 0 0 0 8 1.1Z" />
+              </svg>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent class="app-tooltip-content" side="top" :side-offset="6">打开 GitHub 仓库</TooltipContent>
+        </Tooltip>
         <button
           v-if="availableUpdate"
           class="update-trigger"
@@ -1202,11 +1835,12 @@ function stateLabel(state?: string) {
           @click="updatePopoverOpen = !updatePopoverOpen"
         ><i />更新</button>
         <span v-else-if="appVersion" class="version-label">v{{ appVersion }}</span>
-        <Transition name="update-popover">
-          <section v-if="updatePopoverOpen && availableUpdate" class="update-popover" @keydown.esc="updatePopoverOpen = false">
-            <span>发现新版本</span>
-            <strong>v{{ availableUpdate.version }}</strong>
-            <OverflowTooltip as="p" :text="availableUpdate.body || '已准备好下载并安装最新版本。'">{{ availableUpdate.body || '已准备好下载并安装最新版本。' }}</OverflowTooltip>
+          <Transition name="update-popover">
+            <section v-if="updatePopoverOpen && availableUpdate" class="update-popover" @keydown.esc="updatePopoverOpen = false">
+              <span>{{ availableUpdate.channel === 'preview' ? '发现预览版本' : '发现新版本' }}</span>
+              <strong>v{{ availableUpdate.version }}</strong>
+              <small v-if="availableUpdate.channel === 'preview'" class="preview-update-notice">预览版本可能包含未完成或不稳定的功能。</small>
+              <OverflowTooltip as="p" :text="availableUpdate.body || '已准备好下载并安装最新版本。'">{{ availableUpdate.body || '已准备好下载并安装最新版本。' }}</OverflowTooltip>
             <small v-if="updateInstalling">{{ updateProgressLabel() }}</small>
             <div>
               <button type="button" :disabled="updateInstalling || updateChecking" @click="checkForUpdate(true)">重新检查</button>
@@ -1227,19 +1861,39 @@ function stateLabel(state?: string) {
         :theme="theme"
         :log-link-action="logLinkAction"
         :github-link-visible="githubLinkVisible"
-        :app-version="appVersion"
-        :available-update-version="availableUpdate?.version ?? ''"
-        :available-update-body="availableUpdate?.body ?? ''"
+          :app-version="appVersion"
+          :available-update-version="availableUpdate?.version ?? ''"
+          :available-update-body="availableUpdate?.body ?? ''"
+          :available-update-preview="availableUpdate?.channel === 'preview'"
+          :preview-updates-enabled="previewUpdatesEnabled"
         :update-checking="updateChecking"
         :update-installing="updateInstalling"
         :update-progress-label="updateProgressLabel()"
+        :project-config-opening="projectConfigOpening"
+        :project-import-source="projectImportSource"
+        :project-import-busy="projectImportLoading || projectImporting"
+        :mcp-status="mcpStatus"
+        :mcp-busy="mcpBusy"
+        :mcp-config-text="mcpConfigText()"
+        :notification-position="notificationPosition"
+        :notification-stacking-enabled="notificationStackingEnabled"
+        :notification-testing="notificationTesting"
         @close="settingsOpen = false"
         @toggle-autostart="toggleAutostart"
         @set-theme="theme = $event"
         @set-log-link-action="logLinkAction = $event"
-        @set-github-link-visible="githubLinkVisible = $event"
+          @set-github-link-visible="githubLinkVisible = $event"
+          @set-preview-updates-enabled="previewUpdatesEnabled = $event"
         @check-update="checkForUpdate(true)"
         @install-update="requestInstallAvailableUpdate"
+        @open-project-config-directory="openProjectConfigDirectory"
+        @set-project-import-source="projectImportSource = $event"
+        @open-project-import="openProjectImportDialog"
+        @set-mcp-enabled="setMcpServerEnabled"
+        @copy-mcp-config="copyMcpConfig"
+        @set-notification-position="notificationPosition = $event"
+        @set-notification-stacking-enabled="notificationStackingEnabled = $event"
+        @test-notification="showTestNotification"
       />
 
       <template v-else-if="selectedProject">
@@ -1258,7 +1912,7 @@ function stateLabel(state?: string) {
               </span>
             </span>
             <button type="button" @click="openEditForm">编辑</button>
-            <button class="danger-link" type="button" @click="handleDelete">删除</button>
+            <button class="danger-link" type="button" @click="handleDelete($event)">删除</button>
           </div>
         </header>
 
@@ -1424,6 +2078,32 @@ function stateLabel(state?: string) {
       :groups="projectGroups"
       @close="formOpen = false"
       @save="handleSave"
+    />
+
+    <ImportPromptDialog
+      :open="importPromptOpen"
+      :version="appVersion"
+      @close="importPromptOpen = false"
+      @import="openProjectImportDialog"
+    />
+
+    <ProjectImportDialog
+      :open="projectImportDialogOpen"
+      :candidates="projectImportCandidates"
+      :loading="projectImportLoading"
+      :importing="projectImporting"
+      :source="projectImportSource"
+      @close="projectImportDialogOpen = false"
+      @reload="loadProjectImportCandidates"
+      @import="importProjects"
+    />
+
+    <AgentProjectImportDialog
+      :open="agentProjectImportDialogOpen"
+      :candidates="agentProjectImportCandidates"
+      :importing="agentProjectImporting"
+      @close="agentProjectImportDialogOpen = false"
+      @import="importAgentProjects"
     />
 
     <Teleport to="body">

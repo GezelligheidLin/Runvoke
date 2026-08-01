@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufReader, Read},
     path::{Path, PathBuf},
@@ -12,14 +12,19 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+#[cfg(not(windows))]
+use tauri::LogicalSize;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, RunEvent, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_updater::{Update, UpdaterExt};
 use uuid::Uuid;
 
+mod mcp_server;
 mod window_resize_guard;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +74,39 @@ const LOG_CHANNEL_CAPACITY: usize = 8_192;
 const LOG_BATCH_LIMIT: usize = 256;
 const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(50);
 const LOG_MESSAGE_LIMIT: usize = 16_000;
+const MCP_LOG_HISTORY_LIMIT: usize = 500;
+const PREVIEW_UPDATE_ENDPOINT: &str =
+    "https://runvoke-updates.oss-cn-shanghai.aliyuncs.com/runvoke/latest-prerelease.json";
+const NOTIFICATION_WINDOW_LABEL: &str = "system-notification";
+const NOTIFICATION_WINDOW_WIDTH: f64 = 380.0;
+const NOTIFICATION_WINDOW_HEIGHT: f64 = 132.0;
+const NOTIFICATION_WINDOW_MARGIN: f64 = 18.0;
+const NOTIFICATION_CARD_HEIGHT: f64 = 114.0;
+const NOTIFICATION_STACK_GAP: f64 = 8.0;
+const MAX_VISIBLE_NOTIFICATIONS: u8 = 3;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotificationConfig {
+    id: String,
+    theme: String,
+    position: String,
+    stacking_enabled: bool,
+    tone: String,
+    title: String,
+    message: String,
+    meta: String,
+    dedupe_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotificationHitRegion {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +115,57 @@ struct StoreFile {
     projects: Vec<ProjectConfig>,
     #[serde(default)]
     groups: Vec<ProjectGroup>,
+    #[serde(default)]
+    mcp: McpConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_mcp_port")]
+    port: u16,
+    #[serde(default)]
+    token: String,
+}
+
+const fn default_mcp_port() -> u16 {
+    38_465
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_mcp_port(),
+            token: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerStatus {
+    enabled: bool,
+    running: bool,
+    port: u16,
+    endpoint: String,
+    authorization_token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewUpdate {
+    version: String,
+    body: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewUpdateDownloadProgress {
+    received: usize,
+    total: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,6 +198,15 @@ struct LogEvent {
 struct DetectedProjectName {
     name: String,
     source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportedProject {
+    name: String,
+    directory: String,
+    source: String,
+    suggested_command: Option<String>,
 }
 
 struct ManagedProcess {
@@ -196,11 +294,21 @@ impl Drop for JobHandle {
 }
 
 #[derive(Default)]
+struct NotificationBridge {
+    ready: bool,
+    pending: Vec<NotificationConfig>,
+}
+
+#[derive(Default)]
 struct AppState {
     processes: Mutex<HashMap<String, ManagedProcess>>,
     runs: Mutex<HashMap<String, RuntimeStatus>>,
     exit_codes: Mutex<HashMap<String, Option<i32>>>,
+    logs: Mutex<HashMap<String, Vec<LogEvent>>>,
     log_sender: OnceLock<SyncSender<LogEvent>>,
+    mcp: Mutex<Option<mcp_server::McpServerRuntime>>,
+    preview_update: Mutex<Option<Update>>,
+    notification_bridge: Mutex<NotificationBridge>,
 }
 
 fn now_millis() -> u64 {
@@ -237,6 +345,7 @@ fn save_store(app: &AppHandle, store: &StoreFile) -> Result<(), String> {
 }
 
 fn normalize_project(project: &mut ProjectConfig) {
+    project.directory = display_directory(&project.directory);
     if project.tasks.is_empty() {
         project.tasks.push(ProjectTask {
             id: "default".into(),
@@ -424,10 +533,353 @@ fn detect_project_name(directory: String) -> Result<DetectedProjectName, String>
 }
 
 #[tauri::command]
+async fn check_preview_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<PreviewUpdate>, String> {
+    let endpoint = PREVIEW_UPDATE_ENDPOINT
+        .parse()
+        .map_err(|error| format!("预览更新地址无效：{error}"))?;
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![endpoint])
+        .map_err(|error| format!("初始化预览更新检查失败：{error}"))?
+        .build()
+        .map_err(|error| format!("初始化预览更新器失败：{error}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|error| format!("检查预览更新失败：{error}"))?;
+
+    let preview = update.as_ref().map(|update| PreviewUpdate {
+        version: update.version.clone(),
+        body: update.body.clone().unwrap_or_default(),
+    });
+    let mut pending = state
+        .preview_update
+        .lock()
+        .map_err(|_| "预览更新状态不可用".to_owned())?;
+    *pending = update;
+    Ok(preview)
+}
+
+#[tauri::command]
+async fn install_preview_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let update = state
+        .preview_update
+        .lock()
+        .map_err(|_| "预览更新状态不可用".to_owned())?
+        .take()
+        .ok_or_else(|| "没有可安装的预览更新，请重新检查更新".to_owned())?;
+    let progress_app = app.clone();
+    let _ = app.emit(
+        "preview-update-download-progress",
+        PreviewUpdateDownloadProgress {
+            received: 0,
+            total: None,
+        },
+    );
+    update
+        .download_and_install(
+            move |received, total| {
+                let _ = progress_app.emit(
+                    "preview-update-download-progress",
+                    PreviewUpdateDownloadProgress { received, total },
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|error| format!("安装预览更新失败：{error}"))
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn display_directory(value: &str) -> String {
+    let directory = value.trim();
+    #[cfg(windows)]
+    {
+        if let Some(unc_path) = directory.strip_prefix("\\\\?\\UNC\\") {
+            return format!("\\\\{unc_path}");
+        }
+        return directory
+            .strip_prefix("\\\\?\\")
+            .unwrap_or(directory)
+            .to_owned();
+    }
+    #[cfg(not(windows))]
+    directory.to_owned()
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = hex_value(*bytes.get(index + 1)?)?;
+            let low = hex_value(*bytes.get(index + 2)?)?;
+            decoded.push(high * 16 + low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn vscode_uri_to_path(value: &str) -> Option<PathBuf> {
+    let uri = value.strip_prefix("file://")?;
+    let decoded = percent_decode(uri)?;
+    #[cfg(windows)]
+    {
+        let path = decoded
+            .strip_prefix('/')
+            .unwrap_or(&decoded)
+            .replace('/', "\\");
+        return Some(PathBuf::from(path));
+    }
+    #[cfg(not(windows))]
+    Some(PathBuf::from(decoded))
+}
+
+fn editor_storage_paths(editor_names: &[&str]) -> Vec<PathBuf> {
+    let Some(app_data) = std::env::var_os("APPDATA") else {
+        return Vec::new();
+    };
+    editor_names
+        .iter()
+        .map(|name| {
+            PathBuf::from(&app_data)
+                .join(name)
+                .join("User")
+                .join("globalStorage")
+                .join("storage.json")
+        })
+        .collect()
+}
+
+fn workspace_paths_from_storage(storage: &serde_json::Value) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for key in ["workspaces", "folders"] {
+        if let Some(entries) = storage
+            .get("profileAssociations")
+            .and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_object)
+        {
+            for uri in entries.keys() {
+                let Some(path) = vscode_uri_to_path(uri) else {
+                    continue;
+                };
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("code-workspace"))
+                {
+                    let Some(content) = fs::read_to_string(&path).ok() else {
+                        continue;
+                    };
+                    let Ok(workspace) = serde_json::from_str::<serde_json::Value>(&content) else {
+                        continue;
+                    };
+                    if let Some(folders) = workspace
+                        .get("folders")
+                        .and_then(serde_json::Value::as_array)
+                    {
+                        for folder in folders {
+                            if let Some(folder_uri) =
+                                folder.get("uri").and_then(serde_json::Value::as_str)
+                            {
+                                if let Some(folder_path) = vscode_uri_to_path(folder_uri) {
+                                    paths.push(folder_path);
+                                }
+                            } else if let Some(folder_path) =
+                                folder.get("path").and_then(serde_json::Value::as_str)
+                            {
+                                paths.push(
+                                    path.parent().unwrap_or(Path::new(".")).join(folder_path),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn suggested_project_command(directory: &Path) -> Option<String> {
+    if let Ok(content) = fs::read_to_string(directory.join("package.json")) {
+        if let Ok(package) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(scripts) = package
+                .get("scripts")
+                .and_then(serde_json::Value::as_object)
+            {
+                for name in ["dev", "start", "serve", "watch"] {
+                    if scripts.contains_key(name) {
+                        return Some(format!("pnpm {name}"));
+                    }
+                }
+            }
+        }
+    }
+    if directory.join("Cargo.toml").is_file() {
+        return Some("cargo run".into());
+    }
+    if directory.join("go.mod").is_file() {
+        return Some("go run .".into());
+    }
+    if directory.join("main.py").is_file() {
+        return Some("python main.py".into());
+    }
+    None
+}
+
+fn list_editor_projects(
+    source: &str,
+    storage_paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<Vec<ImportedProject>, String> {
+    let mut paths = Vec::new();
+    for storage_path in storage_paths {
+        let Ok(content) = fs::read_to_string(storage_path) else {
+            continue;
+        };
+        let Ok(storage) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        paths.extend(workspace_paths_from_storage(&storage));
+    }
+
+    let mut seen = HashSet::new();
+    let mut projects = paths
+        .into_iter()
+        .filter_map(|path| {
+            let canonical_directory = path.canonicalize().ok()?;
+            if !canonical_directory.is_dir() {
+                return None;
+            }
+            let key = canonical_directory.to_string_lossy().to_lowercase();
+            if !seen.insert(key) {
+                return None;
+            }
+            let name = canonical_directory
+                .file_name()?
+                .to_string_lossy()
+                .into_owned();
+            Some(ImportedProject {
+                name,
+                directory: display_directory(&canonical_directory.to_string_lossy()),
+                source: source.into(),
+                suggested_command: suggested_project_command(&canonical_directory),
+            })
+        })
+        .collect::<Vec<_>>();
+    projects.sort_by_key(|project| project.directory.to_lowercase());
+    Ok(projects)
+}
+
+#[tauri::command]
+fn list_vscode_projects() -> Result<Vec<ImportedProject>, String> {
+    list_editor_projects(
+        "Visual Studio Code",
+        editor_storage_paths(&["Code", "Code - Insiders", "VSCodium"]),
+    )
+}
+
+#[tauri::command]
+fn list_cursor_projects() -> Result<Vec<ImportedProject>, String> {
+    list_editor_projects("Cursor", editor_storage_paths(&["Cursor"]))
+}
+
+fn mcp_server_status(app: &AppHandle, state: &AppState) -> Result<McpServerStatus, String> {
+    let store = load_store(app)?;
+    let running = state
+        .mcp
+        .lock()
+        .map_err(|_| "MCP 服务状态锁已损坏")?
+        .is_some();
+    let port = store.mcp.port;
+    Ok(McpServerStatus {
+        enabled: store.mcp.enabled,
+        running,
+        port,
+        endpoint: format!("http://127.0.0.1:{port}/mcp"),
+        authorization_token: store.mcp.token,
+    })
+}
+
+#[tauri::command]
+fn get_mcp_server_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<McpServerStatus, String> {
+    mcp_server_status(&app, state.inner())
+}
+
+#[tauri::command]
+async fn set_mcp_server_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<McpServerStatus, String> {
+    if enabled {
+        if state
+            .mcp
+            .lock()
+            .map_err(|_| "MCP 服务状态锁已损坏")?
+            .is_some()
+        {
+            return mcp_server_status(&app, state.inner());
+        }
+
+        let mut store = load_store(&app)?;
+        if store.mcp.token.is_empty() {
+            store.mcp.token = Uuid::new_v4().to_string();
+        }
+        let runtime =
+            mcp_server::start(app.clone(), store.mcp.port, store.mcp.token.clone()).await?;
+        state
+            .mcp
+            .lock()
+            .map_err(|_| "MCP 服务状态锁已损坏")?
+            .replace(runtime);
+        store.mcp.enabled = true;
+        save_store(&app, &store)?;
+    } else {
+        if let Some(runtime) = state.mcp.lock().map_err(|_| "MCP 服务状态锁已损坏")?.take()
+        {
+            runtime.stop();
+        }
+        let mut store = load_store(&app)?;
+        store.mcp.enabled = false;
+        save_store(&app, &store)?;
+    }
+    let status = mcp_server_status(&app, state.inner())?;
+    let _ = app.emit("mcp-server-status", &status);
+    Ok(status)
+}
+
+#[tauri::command]
 fn list_projects(app: AppHandle) -> Result<Vec<ProjectConfig>, String> {
     let mut store = load_store(&app)?;
+    let mut directories_changed = false;
     for project in &mut store.projects {
+        let previous_directory = project.directory.clone();
         normalize_project(project);
+        directories_changed |= project.directory != previous_directory;
+    }
+    if directories_changed {
+        save_store(&app, &store)?;
     }
     Ok(store.projects)
 }
@@ -656,6 +1108,13 @@ fn emit_log_with_mode(
         timestamp: now_millis(),
         mode: mode.to_owned(),
     };
+    if let Ok(mut logs) = app.state::<AppState>().logs.lock() {
+        let history = logs.entry(event.run_id.clone()).or_default();
+        history.push(event.clone());
+        if history.len() > MCP_LOG_HISTORY_LIMIT {
+            history.drain(..history.len() - MCP_LOG_HISTORY_LIMIT);
+        }
+    }
     if let Some(sender) = app.state::<AppState>().log_sender.get() {
         // Logging must never block the managed process. If the UI cannot keep up,
         // dropping old display output is safer than slowing the compiler itself.
@@ -1182,8 +1641,10 @@ fn list_runtime_status(
             } else {
                 "failed"
             }
-        } else {
+        } else if exit_code == &Some(0) {
             "stopped"
+        } else {
+            "failed"
         }
         .into();
         status.pid = None;
@@ -1270,29 +1731,48 @@ fn open_in_file_manager(app: AppHandle, directory: String) -> Result<(), String>
         return Err("项目目录不存在".into());
     }
 
+    open_directory_in_file_manager(Path::new(&directory))?;
+    emit_log(&app, "app", "app", "system", "已请求文件管理器打开项目");
+    Ok(())
+}
+
+fn open_directory_in_file_manager(directory: &Path) -> Result<(), String> {
+    if !directory.is_dir() {
+        return Err("目录不存在".into());
+    }
+
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         Command::new("explorer.exe")
-            .arg(&directory)
+            .arg(directory)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|error| format!("无法打开文件管理器：{error}"))?;
     }
     #[cfg(target_os = "macos")]
     Command::new("open")
-        .arg(&directory)
+        .arg(directory)
         .spawn()
         .map_err(|error| format!("无法打开文件管理器：{error}"))?;
     #[cfg(all(unix, not(target_os = "macos")))]
     Command::new("xdg-open")
-        .arg(&directory)
+        .arg(directory)
         .spawn()
         .map_err(|error| format!("无法打开文件管理器：{error}"))?;
 
-    emit_log(&app, "app", "app", "system", "已请求文件管理器打开项目");
     Ok(())
+}
+
+#[tauri::command]
+fn open_project_config_directory(app: AppHandle) -> Result<(), String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("无法定位项目配置目录：{error}"))?;
+    fs::create_dir_all(&directory).map_err(|error| format!("无法创建项目配置目录：{error}"))?;
+    open_directory_in_file_manager(&directory)
 }
 
 #[tauri::command]
@@ -1354,6 +1834,394 @@ fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, String> 
 #[tauri::command]
 fn set_resize_paint_color(red: u8, green: u8, blue: u8) {
     window_resize_guard::update_color(red, green, blue);
+}
+
+fn notification_window_coordinates(
+    position: &str,
+    work_x: i32,
+    work_y: i32,
+    work_width: u32,
+    work_height: u32,
+    scale_factor: f64,
+    window_height: f64,
+) -> Result<(i32, i32), String> {
+    let window_width = (notification_window_width() * scale_factor).round() as i32;
+    let window_height = (window_height * scale_factor).round() as i32;
+    let available_width = i32::try_from(work_width).unwrap_or(i32::MAX);
+    let available_height = i32::try_from(work_height).unwrap_or(i32::MAX);
+    let left = work_x;
+    let center = work_x.saturating_add((available_width - window_width).max(0) / 2);
+    let right = work_x.saturating_add((available_width - window_width).max(0));
+    let top = work_y;
+    let bottom = work_y.saturating_add((available_height - window_height).max(0));
+
+    match position {
+        "top-left" => Ok((left, top)),
+        "top-center" => Ok((center, top)),
+        "top-right" => Ok((right, top)),
+        "bottom-left" => Ok((left, bottom)),
+        "bottom-center" => Ok((center, bottom)),
+        "bottom-right" => Ok((right, bottom)),
+        _ => Err("通知位置无效".into()),
+    }
+}
+
+fn notification_window_width() -> f64 {
+    NOTIFICATION_WINDOW_WIDTH + NOTIFICATION_WINDOW_MARGIN
+}
+
+fn notification_window_height(count: u8) -> f64 {
+    NOTIFICATION_WINDOW_HEIGHT
+        + f64::from(count.saturating_sub(1)) * (NOTIFICATION_CARD_HEIGHT + NOTIFICATION_STACK_GAP)
+        + NOTIFICATION_WINDOW_MARGIN
+}
+
+fn build_notification_window(
+    app: &AppHandle,
+    theme: &str,
+    position: &str,
+    prewarmed: bool,
+) -> Result<WebviewWindow, String> {
+    let notification_config = serde_json::json!({
+        "theme": theme,
+        "position": position,
+        "prewarmed": prewarmed,
+    });
+    let initialization_script =
+        format!("window.__RUNVOKE_NOTIFICATION__ = {};", notification_config);
+    let window = WebviewWindowBuilder::new(
+        app,
+        NOTIFICATION_WINDOW_LABEL,
+        WebviewUrl::App("index.html".into()),
+    )
+    .initialization_script(initialization_script)
+    .title("Runvoke notification")
+    .inner_size(
+        notification_window_width(),
+        notification_window_height(MAX_VISIBLE_NOTIFICATIONS),
+    )
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focusable(false)
+    .visible(false)
+    .build()
+    .map_err(|error| format!("无法创建测试通知：{error}"))?;
+    window_resize_guard::configure_notification_window(&window)?;
+    Ok(window)
+}
+
+fn ensure_notification_window(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() != NOTIFICATION_WINDOW_LABEL {
+        return Err("该操作仅允许通知窗口调用".into());
+    }
+    Ok(())
+}
+
+fn show_notification_inner(
+    app: &AppHandle,
+    state: &AppState,
+    position: String,
+    theme: String,
+    stacking_enabled: bool,
+    tone: String,
+    title: String,
+    message: String,
+    meta: String,
+    dedupe_key: String,
+) -> Result<(), String> {
+    let notification_id = Uuid::new_v4().to_string();
+    if theme != "light" && theme != "dark" {
+        return Err("通知主题无效".into());
+    }
+    if !matches!(
+        position.as_str(),
+        "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right"
+    ) {
+        return Err("通知位置无效".into());
+    }
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不可用".to_owned())?;
+    let monitor = main_window
+        .current_monitor()
+        .map_err(|error| format!("无法读取当前显示器：{error}"))?
+        .or(main_window
+            .primary_monitor()
+            .map_err(|error| format!("无法读取主显示器：{error}"))?)
+        .ok_or_else(|| "没有可用的显示器".to_owned())?;
+    let work_area = monitor.work_area();
+    let (x, y) = notification_window_coordinates(
+        &position,
+        work_area.position.x,
+        work_area.position.y,
+        work_area.size.width,
+        work_area.size.height,
+        monitor.scale_factor(),
+        notification_window_height(MAX_VISIBLE_NOTIFICATIONS),
+    )?;
+
+    let notification = match app.get_webview_window(NOTIFICATION_WINDOW_LABEL) {
+        Some(window) => window,
+        None => {
+            state
+                .notification_bridge
+                .lock()
+                .map_err(|_| "通知窗口状态锁已损坏")?
+                .ready = false;
+            build_notification_window(&app, &theme, &position, false)?
+        }
+    };
+    notification
+        .set_position(PhysicalPosition::new(x, y))
+        .map_err(|error| format!("无法定位测试通知：{error}"))?;
+    let notification_config = NotificationConfig {
+        id: notification_id.clone(),
+        theme,
+        position,
+        stacking_enabled,
+        tone,
+        title,
+        message,
+        meta,
+        dedupe_key,
+    };
+    let mut notification_bridge = state
+        .notification_bridge
+        .lock()
+        .map_err(|_| "通知窗口状态锁已损坏")?;
+    notification_bridge
+        .pending
+        .push(notification_config.clone());
+    if notification_bridge.pending.len() > usize::from(MAX_VISIBLE_NOTIFICATIONS) {
+        notification_bridge.pending.remove(0);
+    }
+    let notification_ready = notification_bridge.ready;
+    drop(notification_bridge);
+    if notification_ready {
+        if notification
+            .emit("notification-config", notification_config)
+            .is_err()
+        {
+            state
+                .notification_bridge
+                .lock()
+                .map_err(|_| "通知窗口状态锁已损坏")?
+                .ready = false;
+        }
+    }
+    Ok(())
+}
+
+fn validate_notification_text(
+    value: String,
+    field: &str,
+    maximum_length: usize,
+) -> Result<String, String> {
+    let value = value.trim().to_owned();
+    if value.chars().count() > maximum_length {
+        return Err(format!("通知{field}过长"));
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+async fn show_desktop_notification(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    position: String,
+    theme: String,
+    stacking_enabled: bool,
+    tone: String,
+    title: String,
+    message: String,
+    meta: String,
+    dedupe_key: String,
+) -> Result<(), String> {
+    if !matches!(tone.as_str(), "success" | "error") {
+        return Err("通知类型无效".into());
+    }
+    let title = validate_notification_text(title, "标题", 120)?;
+    if title.is_empty() {
+        return Err("通知标题不能为空".into());
+    }
+    let message = validate_notification_text(message, "内容", 280)?;
+    let meta = validate_notification_text(meta, "附加信息", 120)?;
+    let dedupe_key = validate_notification_text(dedupe_key, "去重标识", 120)?;
+    show_notification_inner(
+        &app,
+        state.inner(),
+        position,
+        theme,
+        stacking_enabled,
+        tone,
+        title,
+        message,
+        meta,
+        dedupe_key,
+    )
+}
+
+#[tauri::command]
+async fn show_test_notification(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    position: String,
+    theme: String,
+    stacking_enabled: bool,
+) -> Result<(), String> {
+    show_notification_inner(
+        &app,
+        state.inner(),
+        position,
+        theme,
+        stacking_enabled,
+        "success".into(),
+        "测试通知已送达".into(),
+        "这是一条由独立桌面窗口显示的自定义通知。".into(),
+        "系统通知测试".into(),
+        String::new(),
+    )
+}
+
+#[tauri::command]
+fn notification_window_ready(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Vec<NotificationConfig>, String> {
+    ensure_notification_window(&window)?;
+    let mut notification_bridge = state
+        .notification_bridge
+        .lock()
+        .map_err(|_| "通知窗口状态锁已损坏")?;
+    notification_bridge.ready = true;
+    Ok(notification_bridge.pending.clone())
+}
+
+#[tauri::command]
+fn notification_received(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    ensure_notification_window(&window)?;
+    let mut notification_bridge = state
+        .notification_bridge
+        .lock()
+        .map_err(|_| "通知窗口状态锁已损坏")?;
+    notification_bridge
+        .pending
+        .retain(|notification| notification.id != id);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_notification_hit_regions(
+    window: WebviewWindow,
+    regions: Vec<NotificationHitRegion>,
+) -> Result<(), String> {
+    ensure_notification_window(&window)?;
+    if regions.len() > usize::from(MAX_VISIBLE_NOTIFICATIONS) {
+        return Err("通知命中区域数量无效".into());
+    }
+    let scale = window
+        .scale_factor()
+        .map_err(|error| format!("无法读取通知窗口缩放比例：{error}"))?;
+    let regions = regions
+        .into_iter()
+        .filter(|region| {
+            region.x.is_finite()
+                && region.y.is_finite()
+                && region.width.is_finite()
+                && region.height.is_finite()
+                && region.width > 0.0
+                && region.height > 0.0
+        })
+        .map(|region| {
+            (
+                (region.x * scale).floor() as i32,
+                (region.y * scale).floor() as i32,
+                ((region.x + region.width) * scale).ceil() as i32,
+                ((region.y + region.height) * scale).ceil() as i32,
+            )
+        })
+        .collect();
+    window_resize_guard::set_notification_window_regions(&window, regions)
+}
+
+#[tauri::command]
+fn redraw_notification_window(window: WebviewWindow) -> Result<(), String> {
+    ensure_notification_window(&window)?;
+    window_resize_guard::show_notification_window(&window)?;
+    window_resize_guard::redraw(&window)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn resize_notification_window(
+    app: AppHandle,
+    position: String,
+    count: u8,
+) -> Result<(), String> {
+    if count == 0 || count > MAX_VISIBLE_NOTIFICATIONS {
+        return Err("通知数量无效".into());
+    }
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不可用".to_owned())?;
+    let monitor = main_window
+        .current_monitor()
+        .map_err(|error| format!("无法读取当前显示器：{error}"))?
+        .or(main_window
+            .primary_monitor()
+            .map_err(|error| format!("无法读取主显示器：{error}"))?)
+        .ok_or_else(|| "没有可用的显示器".to_owned())?;
+    let height = notification_window_height(count);
+    let work_area = monitor.work_area();
+    let (x, y) = notification_window_coordinates(
+        &position,
+        work_area.position.x,
+        work_area.position.y,
+        work_area.size.width,
+        work_area.size.height,
+        monitor.scale_factor(),
+        height,
+    )?;
+    let notification = app
+        .get_webview_window(NOTIFICATION_WINDOW_LABEL)
+        .ok_or_else(|| "通知窗口不可用".to_owned())?;
+    #[cfg(windows)]
+    window_resize_guard::set_outer_bounds(
+        &notification,
+        x,
+        y,
+        (notification_window_width() * monitor.scale_factor()).round() as i32,
+        (height * monitor.scale_factor()).round() as i32,
+    )?;
+    #[cfg(not(windows))]
+    {
+        notification
+            .set_size(LogicalSize::new(notification_window_width(), height))
+            .map_err(|error| format!("无法调整测试通知：{error}"))?;
+        notification
+            .set_position(PhysicalPosition::new(x, y))
+            .map_err(|error| format!("无法定位测试通知：{error}"))?;
+    }
+    window_resize_guard::redraw(&notification)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn close_notification_window(window: WebviewWindow) -> Result<(), String> {
+    ensure_notification_window(&window)?;
+    let region_result = window_resize_guard::set_notification_window_regions(&window, Vec::new());
+    let hide_result = window
+        .hide()
+        .map_err(|error| format!("无法关闭测试通知：{error}"));
+    region_result.and(hide_result)
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -1492,6 +2360,44 @@ mod tests {
         assert_eq!(detected.name, "sample-dashboard");
         assert_eq!(detected.source, "package.json");
     }
+
+    #[test]
+    fn positions_notification_inside_monitor_work_area() {
+        assert_eq!(
+            notification_window_coordinates(
+                "bottom-right",
+                0,
+                0,
+                1920,
+                1040,
+                1.0,
+                notification_window_height(1),
+            ),
+            Ok((1522, 890))
+        );
+        assert_eq!(
+            notification_window_coordinates(
+                "top-center",
+                -1920,
+                0,
+                1920,
+                1040,
+                1.0,
+                notification_window_height(1),
+            ),
+            Ok((-1159, 0))
+        );
+        assert!(notification_window_coordinates(
+            "center",
+            0,
+            0,
+            1920,
+            1040,
+            1.0,
+            notification_window_height(1),
+        )
+        .is_err());
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1515,6 +2421,10 @@ pub fn run() {
             list_projects,
             list_project_groups,
             detect_project_name,
+            list_vscode_projects,
+            list_cursor_projects,
+            get_mcp_server_status,
+            set_mcp_server_enabled,
             save_project,
             save_project_group,
             set_project_group_collapsed,
@@ -1530,14 +2440,55 @@ pub fn run() {
             list_runtime_status,
             open_in_vscode,
             open_in_file_manager,
+            open_project_config_directory,
             open_external_url,
             get_autostart_enabled,
             set_autostart_enabled,
             set_resize_paint_color,
+            check_preview_update,
+            install_preview_update,
+            show_desktop_notification,
+            show_test_notification,
+            notification_window_ready,
+            notification_received,
+            set_notification_hit_regions,
+            redraw_notification_window,
+            resize_notification_window,
+            close_notification_window,
         ])
         .setup(|app| {
             setup_log_dispatcher(app)?;
             setup_tray(app)?;
+            let _ = build_notification_window(app.handle(), "light", "bottom-right", true);
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut store = match load_store(&app_handle) {
+                    Ok(store) => store,
+                    Err(_) => return,
+                };
+                if !store.mcp.enabled {
+                    return;
+                }
+                if store.mcp.token.is_empty() {
+                    store.mcp.token = Uuid::new_v4().to_string();
+                    if save_store(&app_handle, &store).is_err() {
+                        return;
+                    }
+                }
+                if let Ok(runtime) =
+                    mcp_server::start(app_handle.clone(), store.mcp.port, store.mcp.token.clone())
+                        .await
+                {
+                    if let Ok(mut mcp) = app_handle.state::<AppState>().mcp.lock() {
+                        mcp.replace(runtime);
+                    }
+                    if let Ok(status) =
+                        mcp_server_status(&app_handle, app_handle.state::<AppState>().inner())
+                    {
+                        let _ = app_handle.emit("mcp-server-status", status);
+                    }
+                }
+            });
             if let Some(window) = app.get_webview_window("main") {
                 window_resize_guard::install(&window, (247, 245, 241))
                     .map_err(std::io::Error::other)?;
@@ -1566,6 +2517,11 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
+            if let Ok(mut mcp) = app_handle.state::<AppState>().mcp.lock() {
+                if let Some(runtime) = mcp.take() {
+                    runtime.stop();
+                }
+            }
             stop_all_processes(&app_handle.state::<AppState>());
         }
     });
