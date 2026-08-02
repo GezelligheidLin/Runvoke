@@ -972,6 +972,19 @@ fn set_project_group_collapsed(
 }
 
 #[tauri::command]
+fn set_project_groups_collapsed(
+    app: AppHandle,
+    collapsed: bool,
+) -> Result<Vec<ProjectGroup>, String> {
+    let mut store = load_store(&app)?;
+    for group in &mut store.groups {
+        group.collapsed = collapsed;
+    }
+    save_store(&app, &store)?;
+    Ok(store.groups)
+}
+
+#[tauri::command]
 fn delete_project_group(app: AppHandle, group_id: String) -> Result<(), String> {
     let mut store = load_store(&app)?;
     if !store.groups.iter().any(|group| group.id == group_id) {
@@ -2428,6 +2441,7 @@ pub fn run() {
             save_project,
             save_project_group,
             set_project_group_collapsed,
+            set_project_groups_collapsed,
             delete_project_group,
             move_project,
             reorder_projects,
