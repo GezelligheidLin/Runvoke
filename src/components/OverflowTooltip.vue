@@ -6,9 +6,11 @@ const props = withDefaults(defineProps<{
   text: string
   as?: string
   side?: 'top' | 'right' | 'bottom' | 'left'
+  always?: boolean
 }>(), {
   as: 'span',
   side: 'top',
+  always: false,
 })
 
 const trigger = ref<HTMLElement | null>(null)
@@ -42,7 +44,7 @@ watch(() => props.text, () => void nextTick(updateTruncation))
         <slot />
       </component>
     </TooltipTrigger>
-    <TooltipContent v-if="truncated" class="app-tooltip-content" :side="side" :side-offset="6">
+    <TooltipContent v-if="always || truncated" class="app-tooltip-content" :side="side" :side-offset="6">
       {{ text }}
     </TooltipContent>
   </Tooltip>
