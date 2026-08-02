@@ -1752,16 +1752,6 @@ function stateLabel(state?: string) {
         </div>
         <div class="fleet-actions">
           <button
-            v-if="projectGroups.length"
-            class="group-collapse-all-button"
-            :class="{ 'collapse-action': !allProjectGroupsCollapsed }"
-            type="button"
-            :aria-label="projectGroupCollapseAllLabel"
-            :title="search.trim() ? '搜索时保持分组展开' : projectGroupCollapseAllLabel"
-            :disabled="Boolean(search.trim()) || groupCollapseAllBusy"
-            @click="toggleAllProjectGroups"
-          ><i aria-hidden="true" /></button>
-          <button
             class="stop-all-button"
             type="button"
             aria-label="停止全部项目任务"
@@ -1785,6 +1775,21 @@ function stateLabel(state?: string) {
         <span aria-hidden="true">搜索</span>
         <input v-model="search" placeholder="搜索项目、目录或命令" />
       </label>
+
+      <div v-if="projectGroups.length" class="project-list-toolbar">
+        <button
+          class="group-collapse-all-button"
+          :class="{ 'collapse-action': !allProjectGroupsCollapsed }"
+          type="button"
+          :aria-label="projectGroupCollapseAllLabel"
+          :title="search.trim() ? '搜索时保持分组展开' : projectGroupCollapseAllLabel"
+          :disabled="Boolean(search.trim()) || groupCollapseAllBusy"
+          @click="toggleAllProjectGroups"
+        >
+          <i aria-hidden="true" />
+          <span>{{ allProjectGroupsCollapsed ? '全部展开' : '全部收起' }}</span>
+        </button>
+      </div>
 
       <div class="scroll-fade-wrap project-list-scroll-wrap" @mouseenter="setScrollbarHover(projectListScrollbar, true)" @mouseleave="setScrollbarHover(projectListScrollbar, false)">
         <nav ref="projectListContainer" class="project-list" aria-label="项目列表" @scroll="updateProjectListScrollbar">
