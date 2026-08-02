@@ -229,6 +229,18 @@ export function useLauncher(options: LauncherOptions = {}) {
     }
   }
 
+  async function setProjectGroupsCollapsed(collapsed: boolean) {
+    const previous = projectGroups.value
+    projectGroups.value = previous.map(group => ({ ...group, collapsed }))
+    try {
+      projectGroups.value = await invoke<ProjectGroup[]>('set_project_groups_collapsed', { collapsed })
+    }
+    catch (value) {
+      projectGroups.value = previous
+      throw value
+    }
+  }
+
   async function moveProject(projectId: string, groupId: string | null, targetIndex: number) {
     const previous = projects.value
     const sourceIndex = previous.findIndex(project => project.id === projectId)
@@ -340,7 +352,7 @@ export function useLauncher(options: LauncherOptions = {}) {
 
   return {
     projects, projectGroups, selectedId, selectedProject, selectedRunId, selectedRun, selectedLogs, projectRuns, runsById,
-    loading, error, autostartEnabled, saveProject, reorderProjects, saveProjectGroup, removeProjectGroup, setProjectGroupCollapsed, moveProject, removeProject, runTask, runTemporaryCommand, stopRun, dismissRun, dismissInactiveRuns,
+    loading, error, autostartEnabled, saveProject, reorderProjects, saveProjectGroup, removeProjectGroup, setProjectGroupCollapsed, setProjectGroupsCollapsed, moveProject, removeProject, runTask, runTemporaryCommand, stopRun, dismissRun, dismissInactiveRuns,
     openInVscode, openInFileManager, setAutostart, clearLogs, formatUptime, refreshWorkspace,
   }
 }

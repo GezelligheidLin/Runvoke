@@ -36,6 +36,7 @@ const {
   saveProjectGroup,
   removeProjectGroup,
   setProjectGroupCollapsed,
+  setProjectGroupsCollapsed,
   moveProject,
   removeProject,
   runTask,
@@ -86,6 +87,7 @@ const groupDraftProjectId = ref('')
 const groupSaving = ref(false)
 const activeGroupMenuId = ref<string | null>(null)
 const ungroupedCollapsed = ref(readUngroupedCollapsed())
+const groupCollapseAllBusy = ref(false)
 const logFilter = ref<'all' | LogStream>('all')
 const autoScroll = ref(true)
 const toast = ref<{ type: 'success' | 'error', message: string } | null>(null)
@@ -426,6 +428,12 @@ const projectGroupSections = computed<ProjectGroupSection[]>(() => {
   }
   return searching ? sections.filter(section => section.projects.length) : sections
 })
+const allProjectGroupsCollapsed = computed(() => (
+  projectGroups.value.length > 0
+  && projectGroups.value.every(group => group.collapsed)
+  && ungroupedCollapsed.value
+))
+const projectGroupCollapseAllLabel = computed(() => allProjectGroupsCollapsed.value ? '展开全部分组' : '收起全部分组')
 
 const visibleLogs = computed(() => {
   if (logFilter.value === 'all')
@@ -1248,6 +1256,32 @@ async function toggleProjectGroup(section: ProjectGroupSection) {
   }
 }
 
+async function toggleAllProjectGroups() {
+  if (groupCollapseAllBusy.value || search.value.trim() || !projectGroups.value.length)
+    return
+
+  activeGroupMenuId.value = null
+  const collapsed = !allProjectGroupsCollapsed.value
+  const previousUngroupedCollapsed = ungroupedCollapsed.value
+  ungroupedCollapsed.value = collapsed
+  groupCollapseAllBusy.value = true
+  try {
+    await setProjectGroupsCollapsed(collapsed)
+  }
+  catch (value) {
+    ungroupedCollapsed.value = previousUngroupedCollapsed
+    notify('error', `保存全部分组状态失败：${String(value)}`)
+  }
+  finally {
+    groupCollapseAllBusy.value = false
+  }
+}
+
+function handleProjectGroupTransitionEnd(event: TransitionEvent) {
+  if (event.target === event.currentTarget && event.propertyName === 'grid-template-rows')
+    updateProjectListScrollbar()
+}
+
 function createGroupFromContextMenu() {
   const projectId = projectContextMenu.value?.project.id
   if (!projectId)
@@ -1718,6 +1752,16 @@ function stateLabel(state?: string) {
         </div>
         <div class="fleet-actions">
           <button
+            v-if="projectGroups.length"
+            class="group-collapse-all-button"
+            :class="{ 'collapse-action': !allProjectGroupsCollapsed }"
+            type="button"
+            :aria-label="projectGroupCollapseAllLabel"
+            :title="search.trim() ? '搜索时保持分组展开' : projectGroupCollapseAllLabel"
+            :disabled="Boolean(search.trim()) || groupCollapseAllBusy"
+            @click="toggleAllProjectGroups"
+          ><i aria-hidden="true" /></button>
+          <button
             class="stop-all-button"
             type="button"
             aria-label="停止全部项目任务"
@@ -1770,36 +1814,44 @@ function stateLabel(state?: string) {
               <button type="button" @click="openRenameGroup(projectGroups.find(group => group.id === section.id))">重命名</button>
               <button class="danger" type="button" @click="handleRemoveGroup(projectGroups.find(group => group.id === section.id))">删除分组</button>
             </div>
-            <ProjectGroupList
-              v-if="!section.collapsed"
-              :key="`${section.id ?? 'ungrouped'}:${section.projects.map(project => project.id).join(',')}`"
-              :group-id="section.id"
-              :projects="section.projects"
-              @move="handleProjectMove"
+            <div
+              class="project-group-collapse"
+              :class="{ collapsed: section.collapsed }"
+              :aria-hidden="section.collapsed"
+              @transitionend="handleProjectGroupTransitionEnd"
             >
-              <template #default="{ project }">
-                <button
-                  class="project-item reorderable"
-                  :class="{
-                    selected: selectedId === project.id,
-                    active: isRunActive(projectState(project.id)),
-                  }"
-                  :data-project-id="project.id"
-                  type="button"
-                  @click="selectProject(project.id)"
-                  @contextmenu="showProjectContextMenu($event, project)"
+              <div class="project-group-collapse-inner">
+                <ProjectGroupList
+                  :key="`${section.id ?? 'ungrouped'}:${section.projects.map(project => project.id).join(',')}`"
+                  :group-id="section.id"
+                  :projects="section.projects"
+                  @move="handleProjectMove"
                 >
-                  <span class="status-beacon" :class="projectState(project.id)"><i /></span>
-                  <span class="project-copy">
-                    <OverflowTooltip as="strong" :text="project.name">{{ project.name }}</OverflowTooltip>
-                    <span class="project-detail-row">
-                      <OverflowTooltip as="small" :text="project.directory">{{ shortPath(project.directory) }}</OverflowTooltip>
-                      <span v-if="project.port" class="port-tag">:{{ project.port }}</span>
-                    </span>
-                  </span>
-                </button>
-              </template>
-            </ProjectGroupList>
+                  <template #default="{ project }">
+                    <button
+                      class="project-item reorderable"
+                      :class="{
+                        selected: selectedId === project.id,
+                        active: isRunActive(projectState(project.id)),
+                      }"
+                      :data-project-id="project.id"
+                      type="button"
+                      @click="selectProject(project.id)"
+                      @contextmenu="showProjectContextMenu($event, project)"
+                    >
+                      <span class="status-beacon" :class="projectState(project.id)"><i /></span>
+                      <span class="project-copy">
+                        <OverflowTooltip as="strong" :text="project.name">{{ project.name }}</OverflowTooltip>
+                        <span class="project-detail-row">
+                          <OverflowTooltip as="small" :text="project.directory">{{ shortPath(project.directory) }}</OverflowTooltip>
+                          <span v-if="project.port" class="port-tag">:{{ project.port }}</span>
+                        </span>
+                      </span>
+                    </button>
+                  </template>
+                </ProjectGroupList>
+              </div>
+            </div>
           </section>
 
           <div v-if="!loading && !projectGroupSections.length" class="list-empty">
