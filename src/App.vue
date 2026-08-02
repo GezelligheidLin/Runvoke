@@ -896,11 +896,21 @@ function openSettingsPage() {
 
 function promptProjectImportAfterUpdate(version: string) {
   try {
-    const storageKey = 'runvoke:last-opened-version'
-    const previousVersion = window.localStorage.getItem(storageKey)
-    window.localStorage.setItem(storageKey, version)
-    if (previousVersion && previousVersion !== version)
+    const versionStorageKey = 'runvoke:last-opened-version'
+    const promptStateStorageKey = 'runvoke:project-import-prompt-state'
+    const previousVersion = window.localStorage.getItem(versionStorageKey)
+    const promptState = window.localStorage.getItem(promptStateStorageKey)
+    window.localStorage.setItem(versionStorageKey, version)
+
+    if (!promptState) {
+      window.localStorage.setItem(promptStateStorageKey, previousVersion ? 'shown' : 'pending')
+      return
+    }
+
+    if (promptState === 'pending' && previousVersion && previousVersion !== version) {
+      window.localStorage.setItem(promptStateStorageKey, 'shown')
       importPromptOpen.value = true
+    }
   }
   catch {
     // The import prompt is optional when local storage is unavailable.

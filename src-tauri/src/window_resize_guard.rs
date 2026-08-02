@@ -123,8 +123,7 @@ pub fn show_notification_window<R: Runtime>(window: &WebviewWindow<R>) -> Result
             .hwnd()
             .map_err(|error| format!("无法获取通知窗口句柄：{error}"))?;
         imp::configure_notification_window(hwnd.0 as isize)?;
-        imp::show_notification_window(hwnd.0 as isize);
-        Ok(())
+        imp::show_notification_window(hwnd.0 as isize)
     }
 
     #[cfg(not(windows))]
@@ -147,8 +146,8 @@ mod imp {
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         FindWindowExW, GetClientRect, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos,
-        ShowWindow, GWL_EXSTYLE, GWL_STYLE, SIZE_MINIMIZED, STYLESTRUCT, SWP_FRAMECHANGED,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNOACTIVATE, WM_ERASEBKGND,
+        GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, SIZE_MINIMIZED, STYLESTRUCT, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WM_ERASEBKGND,
         WM_EXITSIZEMOVE, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCPAINT, WM_SIZE,
         WM_STYLECHANGING, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME,
         WS_EX_NOACTIVATE, WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX,
@@ -314,8 +313,25 @@ mod imp {
         Ok(())
     }
 
-    pub(super) fn show_notification_window(hwnd_raw: isize) {
-        unsafe { ShowWindow(hwnd_raw as HWND, SW_SHOWNOACTIVATE) };
+    pub(super) fn show_notification_window(hwnd_raw: isize) -> Result<(), String> {
+        let shown = unsafe {
+            SetWindowPos(
+                hwnd_raw as HWND,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+        };
+        if shown == 0 {
+            return Err(format!(
+                "无法置顶通知窗口：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn redraw(hwnd_raw: isize) -> Result<(), String> {
