@@ -342,6 +342,20 @@ function splitLogMessage(message: string): LogSegment[] {
   return segments.length ? segments : [{ text: message || ' ' }]
 }
 
+function isLocalhostUrl(url: string) {
+  try {
+    const parsedUrl = new URL(url)
+    return parsedUrl.protocol === 'http:' && parsedUrl.hostname.toLocaleLowerCase() === 'localhost'
+  }
+  catch {
+    return false
+  }
+}
+
+function isPrimaryLocalhostMessage(message: string) {
+  return /\blocal\s*:\s*http:\/\/localhost(?=[:/?#\s<>"']|$)/i.test(message)
+}
+
 async function handleLogLink(url: string) {
   if (logLinkAction.value === 'copy') {
     try {
@@ -440,6 +454,57 @@ const visibleLogs = computed(() => {
     return selectedLogs.value
   return selectedLogs.value.filter((entry) => entry.stream === logFilter.value)
 })
+
+const primaryLocalhostLogEntryId = computed(() => {
+  let firstLocalhostEntryId: string | null = null
+  let latestPrimaryEntryId: string | null = null
+
+  for (const entry of selectedLogs.value) {
+    const containsLocalhostUrl = splitLogMessage(entry.message)
+      .some(segment => segment.url && isLocalhostUrl(segment.url))
+    if (!containsLocalhostUrl)
+      continue
+
+    firstLocalhostEntryId ??= entry.id
+    if (isPrimaryLocalhostMessage(entry.message))
+      latestPrimaryEntryId = entry.id
+  }
+
+  return latestPrimaryEntryId ?? firstLocalhostEntryId
+})
+
+async function locatePrimaryLocalhostLink() {
+  const entryId = primaryLocalhostLogEntryId.value
+  if (!entryId)
+    return
+
+  autoScroll.value = false
+  logFilter.value = 'all'
+  await nextTick()
+
+  const container = logContainer.value
+  const targetRow = Array.from(container?.querySelectorAll<HTMLElement>('.log-line') ?? [])
+    .find(row => row.dataset.logEntryId === entryId)
+  const targetLink = Array.from(targetRow?.querySelectorAll<HTMLButtonElement>('.log-link') ?? [])
+    .find(link => link.dataset.localhostLink === 'true')
+  if (!container || !targetLink)
+    return
+
+  const containerRect = container.getBoundingClientRect()
+  const targetRect = targetLink.getBoundingClientRect()
+  const centeredTop = container.scrollTop
+    + targetRect.top
+    - containerRect.top
+    - (container.clientHeight - targetRect.height) / 2
+  const maximumTop = Math.max(0, container.scrollHeight - container.clientHeight)
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+  container.scrollTo({
+    top: Math.min(maximumTop, Math.max(0, centeredTop)),
+    behavior: prefersReducedMotion ? 'auto' : 'smooth',
+  })
+  targetLink.focus({ preventScroll: true })
+}
 
 const activeRuns = computed(() => Object.values(runsById.value).filter(run => isRunActive(run.state)))
 const runningCount = computed(() => activeRuns.value.length)
@@ -2073,18 +2138,34 @@ function stateLabel(state?: string) {
                   <div class="filter-tabs">
                     <button v-for="filter in ['all', 'stdout', 'stderr'] as const" :key="filter" type="button" :class="{ active: logFilter === filter }" @click="logFilter = filter">{{ filter === 'all' ? '全部' : filter }}</button>
                   </div>
-                  <label class="auto-scroll"><input v-model="autoScroll" type="checkbox" /> 自动滚动</label>
-                  <button v-if="isRunActive(selectedRun.state)" class="clear-button" type="button" @click="confirmStopRun($event, selectedRun!)">停止</button>
-                  <button class="clear-button" type="button" @click="clearLogs(selectedRun.runId)">清空</button>
+                  <div class="terminal-actions">
+                    <button v-if="primaryLocalhostLogEntryId" class="locate-link-button terminal-control-button" type="button" aria-label="定位本地地址" title="定位本地地址" @click="locatePrimaryLocalhostLink">
+                      <svg class="terminal-control-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7" /><circle cx="12" cy="12" r="2" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></svg>
+                      <span class="terminal-control-text">定位地址</span>
+                    </button>
+                    <label class="auto-scroll" title="自动滚动">
+                      <input v-model="autoScroll" type="checkbox" aria-label="自动滚动" />
+                      <svg class="terminal-control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 11l4 4 4-4M5 20h14" /></svg>
+                      <span class="terminal-control-text">自动滚动</span>
+                    </label>
+                    <button v-if="isRunActive(selectedRun.state)" class="clear-button terminal-control-button" type="button" aria-label="停止任务" title="停止任务" @click="confirmStopRun($event, selectedRun!)">
+                      <svg class="terminal-control-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1" /></svg>
+                      <span class="terminal-control-text">停止</span>
+                    </button>
+                    <button class="clear-button terminal-control-button" type="button" aria-label="清空日志" title="清空日志" @click="clearLogs(selectedRun.runId)">
+                      <svg class="terminal-control-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></svg>
+                      <span class="terminal-control-text">清空</span>
+                    </button>
+                  </div>
                 </div>
               </header>
 
               <div class="scroll-fade-wrap terminal-scroll-wrap" @mouseenter="setScrollbarHover(logScrollbar, true)" @mouseleave="setScrollbarHover(logScrollbar, false)">
                 <div ref="logContainer" class="terminal-output" @scroll="updateLogScrollbar">
                   <div v-if="visibleLogs.length" class="log-lines">
-                    <div v-for="entry in visibleLogs" :key="entry.id" v-memo="[entry.id, logLinkAction]" class="log-line" :class="entry.stream">
+                    <div v-for="entry in visibleLogs" :key="entry.id" v-memo="[entry.id, logLinkAction]" class="log-line" :class="entry.stream" :data-log-entry-id="entry.id">
                       <time>{{ formatTime(entry.timestamp) }}</time><b>{{ entry.stream }}</b>
-                      <pre><template v-for="(segment, index) in splitLogMessage(entry.message)" :key="index"><button v-if="segment.url" class="log-link" type="button" :title="logLinkAction === 'open' ? '使用默认浏览器打开' : '复制链接'" @click="handleLogLink(segment.url)">{{ segment.text }}</button><span v-else>{{ segment.text }}</span></template></pre>
+                      <pre><template v-for="(segment, index) in splitLogMessage(entry.message)" :key="index"><button v-if="segment.url" class="log-link" type="button" :title="logLinkAction === 'open' ? '使用默认浏览器打开' : '复制链接'" :data-localhost-link="isLocalhostUrl(segment.url) ? 'true' : undefined" @click="handleLogLink(segment.url)">{{ segment.text }}</button><span v-else>{{ segment.text }}</span></template></pre>
                     </div>
                   </div>
                   <div v-else class="terminal-empty"><p>{{ selectedRun ? '等待任务输出' : '从上方选择一个任务开始' }}</p><small>{{ selectedRun ? '标准输出和错误输出会显示在这里' : '常驻服务和一次性任务可同时运行' }}</small></div>
