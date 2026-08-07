@@ -7,11 +7,21 @@ export interface ProjectConfig {
   id: string
   name: string
   directory: string
+  /** 当前工作树分支，仅由后端运行时读取，不写入项目配置。 */
+  gitBranch?: string | null
+  stagedChanges?: number | null
+  unstagedChanges?: number | null
   groupId: string | null
   command: string
   env: EnvVariable[]
   port: number | null
   tasks: ProjectTask[]
+}
+
+export interface ProjectGitStatus {
+  gitBranch: string | null
+  stagedChanges: number
+  unstagedChanges: number
 }
 
 export interface ProjectGroup {

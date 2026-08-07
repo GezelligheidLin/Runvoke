@@ -4,7 +4,7 @@ use std::{
     fs,
     io::{BufReader, Read},
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{
         mpsc::{sync_channel, RecvTimeoutError, SyncSender},
         Mutex, OnceLock,
@@ -49,6 +49,14 @@ struct ProjectConfig {
     port: Option<u16>,
     #[serde(default)]
     tasks: Vec<ProjectTask>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitProjectStatus {
+    git_branch: Option<String>,
+    staged_changes: u32,
+    unstaged_changes: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +378,76 @@ fn normalize_project(project: &mut ProjectConfig) {
         .first()
         .map(|task| task.command.clone())
         .unwrap_or_default();
+}
+
+fn git_output(directory: &Path, arguments: &[&str]) -> Option<Output> {
+    if !directory.is_dir() {
+        return None;
+    }
+
+    let mut command = Command::new("git");
+    command.arg("-C").arg(directory).args(arguments);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = command.output().ok()?;
+    output.status.success().then_some(output)
+}
+
+fn git_change_counts(status: &[u8]) -> (u32, u32) {
+    let mut staged_changes = 0;
+    let mut unstaged_changes = 0;
+    let mut skip_rename_origin = false;
+
+    for entry in status.split(|byte| *byte == 0) {
+        if entry.is_empty() {
+            continue;
+        }
+        if skip_rename_origin {
+            skip_rename_origin = false;
+            continue;
+        }
+        if entry.len() < 2 {
+            continue;
+        }
+
+        let index_status = entry[0];
+        let worktree_status = entry[1];
+        if index_status == b'?' && worktree_status == b'?' {
+            unstaged_changes += 1;
+            continue;
+        }
+        if index_status != b' ' {
+            staged_changes += 1;
+        }
+        if worktree_status != b' ' {
+            unstaged_changes += 1;
+        }
+        if matches!(index_status, b'R' | b'C') {
+            skip_rename_origin = true;
+        }
+    }
+
+    (staged_changes, unstaged_changes)
+}
+
+fn current_git_status(directory: &Path) -> Option<GitProjectStatus> {
+    let branch_output = git_output(directory, &["branch", "--show-current"])?;
+    let status_output = git_output(directory, &["status", "--porcelain=v1", "-z"])?;
+    let branch = String::from_utf8_lossy(&branch_output.stdout)
+        .trim()
+        .to_owned();
+    let (staged_changes, unstaged_changes) = git_change_counts(&status_output.stdout);
+
+    Some(GitProjectStatus {
+        git_branch: (!branch.is_empty()).then_some(branch),
+        staged_changes,
+        unstaged_changes,
+    })
 }
 
 fn validate_project(project: &ProjectConfig) -> Result<(), String> {
@@ -882,6 +960,19 @@ fn list_projects(app: AppHandle) -> Result<Vec<ProjectConfig>, String> {
         save_store(&app, &store)?;
     }
     Ok(store.projects)
+}
+
+#[tauri::command]
+fn get_project_git_status(
+    app: AppHandle,
+    project_id: String,
+) -> Result<Option<GitProjectStatus>, String> {
+    let project = load_store(&app)?
+        .projects
+        .into_iter()
+        .find(|project| project.id == project_id);
+
+    Ok(project.and_then(|project| current_git_status(Path::new(&project.directory))))
 }
 
 #[tauri::command]
@@ -2349,6 +2440,39 @@ mod tests {
     }
 
     #[test]
+    fn git_project_status_uses_runtime_field_names() {
+        let value = serde_json::to_value(GitProjectStatus {
+            git_branch: Some("develop".into()),
+            staged_changes: 2,
+            unstaged_changes: 1,
+        })
+        .unwrap();
+
+        assert_eq!(
+            value.get("gitBranch").and_then(|value| value.as_str()),
+            Some("develop")
+        );
+        assert_eq!(
+            value.get("stagedChanges").and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            value
+                .get("unstagedChanges")
+                .and_then(|value| value.as_u64()),
+            Some(1)
+        );
+        assert!(value.get("project").is_none());
+    }
+
+    #[test]
+    fn counts_staged_and_unstaged_git_changes_by_file() {
+        let status = b"M  staged.txt\0 M modified.txt\0MM both.txt\0?? untracked.txt\0R  renamed.txt\0original.txt\0";
+
+        assert_eq!(git_change_counts(status), (3, 3));
+    }
+
+    #[test]
     fn reads_project_name_from_toml_sections() {
         let content = "[build-system]\nrequires = []\n\n[project]\nname = \"utility-kit\"\n";
         assert_eq!(
@@ -2432,6 +2556,7 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             list_projects,
+            get_project_git_status,
             list_project_groups,
             detect_project_name,
             list_vscode_projects,

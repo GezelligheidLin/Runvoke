@@ -1,7 +1,7 @@
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { LogEntry, ProjectConfig, ProjectGroup, ProjectTask, RuntimeStatus } from '../types'
+import type { LogEntry, ProjectConfig, ProjectGitStatus, ProjectGroup, ProjectTask, RuntimeStatus } from '../types'
 
 const LOG_LIMIT = 2_000
 const LOG_FLUSH_INTERVAL = 50
@@ -29,6 +29,7 @@ function isReplaceableProgress(message: string) {
 
 export function useLauncher(options: LauncherOptions = {}) {
   const projects = ref<ProjectConfig[]>([])
+  const gitStatusByProjectId = ref<Record<string, ProjectGitStatus | null>>({})
   const projectGroups = ref<ProjectGroup[]>([])
   const runsById = ref<Record<string, RuntimeStatus>>({})
   const logsByRunId = shallowRef<Record<string, LogEntry[]>>({})
@@ -40,14 +41,20 @@ export function useLauncher(options: LauncherOptions = {}) {
   const now = ref(Date.now())
   const unlisteners: UnlistenFn[] = []
   let pollTimer: ReturnType<typeof setInterval> | undefined
+  let projectPollTimer: ReturnType<typeof setInterval> | undefined
   let clockTimer: ReturnType<typeof setInterval> | undefined
   let logFlushTimer: ReturnType<typeof setTimeout> | undefined
   let logSequence = 0
+  let gitStatusRequestId = 0
   const pendingLogsByRunId = new Map<string, IncomingLog[]>()
 
-  const selectedProject = computed(() =>
-    projects.value.find((project) => project.id === selectedId.value) ?? null,
-  )
+  const selectedProject = computed(() => {
+    const project = projects.value.find((item) => item.id === selectedId.value)
+    if (!project)
+      return null
+    const gitStatus = gitStatusByProjectId.value[project.id]
+    return gitStatus ? { ...project, ...gitStatus } : project
+  })
   const projectRuns = computed(() => Object.values(runsById.value)
     .filter((run) => run.projectId === selectedId.value)
     .sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0)))
@@ -141,12 +148,26 @@ export function useLauncher(options: LauncherOptions = {}) {
       selectedId.value = projects.value[0]?.id ?? null
   }
 
+  async function refreshSelectedProjectGitStatus(projectId = selectedId.value) {
+    if (!projectId)
+      return
+    const requestId = ++gitStatusRequestId
+    const status = await invoke<ProjectGitStatus | null>('get_project_git_status', { projectId })
+    if (requestId !== gitStatusRequestId)
+      return
+    gitStatusByProjectId.value = {
+      ...gitStatusByProjectId.value,
+      [projectId]: status,
+    }
+  }
+
   async function refreshProjectGroups() {
     projectGroups.value = await invoke<ProjectGroup[]>('list_project_groups')
   }
 
   async function refreshWorkspace() {
     await Promise.all([refreshProjects(), refreshProjectGroups()])
+    await refreshSelectedProjectGitStatus()
   }
 
   async function refreshRuntime(announce = false) {
@@ -176,6 +197,7 @@ export function useLauncher(options: LauncherOptions = {}) {
         invoke<boolean>('get_autostart_enabled').then((enabled) => { autostartEnabled.value = enabled }),
       ])
       pollTimer = setInterval(() => void refreshRuntime(true).catch(reportError), 1_500)
+      projectPollTimer = setInterval(() => void refreshSelectedProjectGitStatus().catch(reportError), 5_000)
       clockTimer = setInterval(() => { now.value = Date.now() }, 1_000)
     }
     catch (value) { reportError(value) }
@@ -186,6 +208,7 @@ export function useLauncher(options: LauncherOptions = {}) {
     const saved = await invoke<ProjectConfig>('save_project', { project })
     await refreshProjects()
     selectedId.value = saved.id
+    await refreshSelectedProjectGitStatus(saved.id)
     return saved
   }
 
@@ -268,6 +291,9 @@ export function useLauncher(options: LauncherOptions = {}) {
 
   async function removeProject(projectId: string) {
     await invoke('delete_project', { projectId })
+    const { [projectId]: removedGitStatus, ...remainingGitStatuses } = gitStatusByProjectId.value
+    gitStatusByProjectId.value = remainingGitStatuses
+    void removedGitStatus
     const removedRunIds = new Set(Object.values(runsById.value).filter(run => run.projectId === projectId).map(run => run.runId))
     removedRunIds.forEach(runId => pendingLogsByRunId.delete(runId))
     logsByRunId.value = Object.fromEntries(Object.entries(logsByRunId.value).filter(([runId]) => !removedRunIds.has(runId)))
@@ -341,11 +367,28 @@ export function useLauncher(options: LauncherOptions = {}) {
       .map((value) => value.toString().padStart(2, '0')).join(':')
   }
 
-  onMounted(() => void initialize())
+  function refreshProjectsOnWindowFocus() {
+    if (document.visibilityState === 'hidden')
+      return
+    void refreshSelectedProjectGitStatus().catch(reportError)
+  }
+
+  watch(selectedId, (projectId) => {
+    void refreshSelectedProjectGitStatus(projectId).catch(reportError)
+  })
+
+  onMounted(() => {
+    window.addEventListener('focus', refreshProjectsOnWindowFocus)
+    document.addEventListener('visibilitychange', refreshProjectsOnWindowFocus)
+    void initialize()
+  })
   onBeforeUnmount(() => {
     if (pollTimer) clearInterval(pollTimer)
+    if (projectPollTimer) clearInterval(projectPollTimer)
     if (clockTimer) clearInterval(clockTimer)
     if (logFlushTimer) clearTimeout(logFlushTimer)
+    window.removeEventListener('focus', refreshProjectsOnWindowFocus)
+    document.removeEventListener('visibilitychange', refreshProjectsOnWindowFocus)
     pendingLogsByRunId.clear()
     unlisteners.forEach((unlisten) => unlisten())
   })

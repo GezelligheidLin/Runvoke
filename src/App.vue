@@ -2027,7 +2027,23 @@ function stateLabel(state?: string) {
         <header class="workspace-header">
           <div class="project-title">
             <span class="section-kicker">当前项目</span>
-            <h1>{{ selectedProject.name }}</h1>
+            <div class="project-heading">
+              <h1>{{ selectedProject.name }}</h1>
+              <span v-if="selectedProject.gitBranch" class="project-branch">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v8.2a2.3 2.3 0 1 0 1.5 2.15V6.4h4.2a2.3 2.3 0 1 1-1.5 2.15" /><circle cx="4" cy="2.5" r="1.5" /><circle cx="12" cy="10.7" r="1.5" /></svg>
+                <span class="project-branch-label">分支</span>
+                <OverflowTooltip as="span" :text="`Git 分支：${selectedProject.gitBranch}`">{{ selectedProject.gitBranch }}</OverflowTooltip>
+                <span
+                  v-if="selectedProject.stagedChanges !== null && selectedProject.stagedChanges !== undefined && selectedProject.unstagedChanges !== null && selectedProject.unstagedChanges !== undefined"
+                  class="project-git-changes"
+                  :aria-label="`暂存 ${selectedProject.stagedChanges} 个文件，未暂存 ${selectedProject.unstagedChanges} 个文件`"
+                >
+                  <span class="staged"><b>{{ selectedProject.stagedChanges }}</b> 暂存</span>
+                  <i aria-hidden="true">·</i>
+                  <span class="unstaged"><b>{{ selectedProject.unstagedChanges }}</b> 未暂存</span>
+                </span>
+              </span>
+            </div>
             <OverflowTooltip as="code" :text="selectedProject.directory">{{ selectedProject.directory }}</OverflowTooltip>
           </div>
           <div class="header-actions">

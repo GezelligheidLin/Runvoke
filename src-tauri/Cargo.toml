@@ -1,6 +1,6 @@
 [package]
 name = "runvoke"
-version = "0.1.15"
+version = "0.1.16-dev.1"
 description = "A desktop launcher for local development projects"
 authors = ["Runvoke contributors"]
 edition = "2021"
