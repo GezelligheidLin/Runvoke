@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Runvoke 是一个集中启动、观察与管理本地开发项目的 Windows 桌面工作台。" />
+    <meta name="theme-color" content="#f7f5f1" />
+    <meta property="og:title" content="Runvoke — 让本地项目井然有序" />
+    <meta property="og:description" content="把项目、常用命令、运行状态和实时日志收进一个安静清晰的工作台。" />
+    <link rel="icon" type="image/png" href="./assets/icon.png" />
+    <script>document.documentElement.classList.add('js')</script>
+    <link rel="stylesheet" href="./styles.css" />
+    <title>Runvoke — 本地开发工作台</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header" data-header>
+      <div class="shell header-inner">
+        <a class="brand" href="#top" aria-label="Runvoke 首页">
+          <img src="./assets/icon.png" alt="" width="36" height="36" />
+          <span>Runvoke</span>
+        </a>
+
+        <nav class="desktop-nav" aria-label="主导航">
+          <a href="#features">功能</a>
+          <a href="#workflow">使用方式</a>
+          <a href="#experience">界面</a>
+          <a href="#download">下载</a>
+        </nav>
+
+        <div class="header-actions">
+          <button class="icon-action theme-toggle" type="button" data-theme-toggle aria-label="切换深浅主题" title="切换深浅主题">
+            <svg class="sun-icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v2.1M12 19.9V22M4.93 4.93l1.49 1.49M17.58 17.58l1.49 1.49M2 12h2.1M19.9 12H22M4.93 19.07l1.49-1.49M17.58 6.42l1.49-1.49"/></svg>
+            <svg class="moon-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M20.4 15.2A8.4 8.4 0 0 1 8.8 3.6 8.4 8.4 0 1 0 20.4 15.2Z"/></svg>
+          </button>
+          <a class="github-link" href="https://github.com/GezelligheidLin/Runvoke" target="_blank" rel="noreferrer">GitHub</a>
+          <a class="header-download" href="https://github.com/GezelligheidLin/Runvoke/releases/latest" target="_blank" rel="noreferrer">下载 v0.1.13</a>
+          <button class="menu-toggle" type="button" data-menu-toggle aria-expanded="false" aria-controls="mobile-nav" aria-label="打开导航菜单">
+            <span></span><span></span>
+          </button>
+        </div>
+      </div>
+
+      <nav class="mobile-nav" id="mobile-nav" data-mobile-nav aria-label="移动端导航">
+        <a href="#features">功能</a>
+        <a href="#workflow">使用方式</a>
+        <a href="#experience">界面</a>
+        <a href="#download">下载</a>
+        <a href="https://github.com/GezelligheidLin/Runvoke" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-grid" data-parallax-grid aria-hidden="true"></div>
+        <div class="shell hero-layout">
+          <div class="hero-copy reveal">
+            <p class="eyebrow"><span></span> 为 Windows 打造的本地开发工作台</p>
+            <h1>把散落的项目，<em>收回一个工作台。</em></h1>
+            <p class="hero-lead">告别层层叠叠的终端窗口。Runvoke 把项目、常用命令、运行状态和实时日志放在一起，让启动与观察都变得简单。</p>
+            <div class="hero-actions">
+              <a class="button button-primary" href="https://github.com/GezelligheidLin/Runvoke/releases/latest" target="_blank" rel="noreferrer">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 4.5 10.5 3v8H3V4.5Zm9 6.5V2.7L21 1v10h-9ZM3 12.5h7.5v8L3 19v-6.5Zm9 0h9v10l-9-1.7v-8.3Z"/></svg>
+                下载 Windows 版
+              </a>
+              <a class="button button-secondary" href="#features">先看看能做什么 <span aria-hidden="true">↓</span></a>
+            </div>
+            <ul class="hero-meta" aria-label="产品信息">
+              <li><b>v0.1.13</b><span>当前版本</span></li>
+              <li><b>免费</b><span>无需注册</span></li>
+              <li><b>本机</b><span>保存项目数据</span></li>
+            </ul>
+          </div>
+
+          <div class="hero-stage reveal reveal-delay-1" data-parallax-hero>
+            <div class="stage-index" aria-hidden="true"><b>01</b><span>WORKSPACE<br />RUNNING</span></div>
+            <figure class="app-window">
+              <div class="window-topbar" aria-hidden="true">
+                <span class="window-brand"><img src="./assets/icon.png" alt="" /> Runvoke</span>
+                <span class="window-controls">—　□　×</span>
+              </div>
+              <img src="./assets/project-runtime-active.webp" width="1734" height="1263" fetchpriority="high" decoding="async" alt="Runvoke 工作台中正在运行的项目、任务和实时日志" />
+            </figure>
+            <div class="stage-note" aria-hidden="true">
+              <span class="status-dot"></span>
+              <div><small>当前状态</small><strong>开发服务器正在运行</strong></div>
+            </div>
+            <div class="stage-caption" aria-hidden="true"><span>项目</span><span>任务</span><span>日志</span><b>始终在同一处</b></div>
+          </div>
+        </div>
+        <div class="shell hero-footnote reveal"><span>RUNVOKE / LOCAL WORKSPACE</span><p>从项目启动到任务结束，始终清楚。</p></div>
+      </section>
+
+      <section class="promise-strip" aria-label="产品特点">
+        <div class="shell promise-layout">
+          <div class="promise-intro reveal">
+            <p class="kicker">更轻的工作方式</p>
+            <h2>少开几个终端，<br>多留一点注意力。</h2>
+            <p>把频繁切换、反复确认的事情集中起来，让工作区重新变得清楚。</p>
+          </div>
+          <ol class="promise-list">
+            <li class="reveal">
+              <span class="promise-index">01</span>
+              <div>
+                <h3>项目与任务，各归其位</h3>
+                <p>不必再靠终端标题辨认正在做什么。</p>
+              </div>
+            </li>
+            <li class="reveal">
+              <span class="promise-index">02</span>
+              <div>
+                <h3>常用操作，打开就能用</h3>
+                <p>告别反复查找命令和重走启动流程。</p>
+              </div>
+            </li>
+            <li class="reveal">
+              <span class="promise-index">03</span>
+              <div>
+                <h3>运行结果，随时看得见</h3>
+                <p>状态与记录都在眼前，不再凭感觉猜测。</p>
+              </div>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section intro-section" id="features">
+        <div class="shell">
+          <div class="section-heading reveal">
+            <p class="kicker">核心功能</p>
+            <h2>项目多，不代表工作区要乱。</h2>
+            <p>从打开电脑到结束一天的工作，Runvoke 替你收好那些重复、分散又容易忘记的操作。</p>
+          </div>
+
+          <div class="feature-story reveal">
+            <div class="story-copy">
+              <span class="story-index">01 / 项目与任务</span>
+              <h3>项目一眼找到，<br />任务一键运行。</h3>
+              <p>为每个项目保存常用任务，按分组整理并自由拖动排序。需要开发、构建或执行临时命令时，不必再寻找目录和翻找历史记录。</p>
+              <ul class="check-list">
+                <li><span>✓</span> 自动识别常见项目名称</li>
+                <li><span>✓</span> 常驻任务与一次任务清晰区分</li>
+                <li><span>✓</span> 支持搜索、分组和拖拽排序</li>
+              </ul>
+            </div>
+            <div class="story-visual project-visual" data-parallax-media aria-label="项目管理功能示意">
+              <div class="mock-sidebar">
+                <div class="mock-search">搜索项目…</div>
+                <small>日常开发　3</small>
+                <div class="mock-project active"><i></i><span><b>Runvoke</b><em>本地开发工作台</em></span></div>
+                <div class="mock-project"><i></i><span><b>产品官网</b><em>正在运行 · :4175</em></span></div>
+                <small>实验项目　2</small>
+                <div class="mock-project"><i></i><span><b>组件演示</b><em>暂无运行任务</em></span></div>
+              </div>
+              <div class="mock-main">
+                <p>当前项目</p>
+                <h4>Runvoke</h4>
+                <span>选择要执行的任务</span>
+                <div class="mock-task running"><div><b>开发服务器</b><small>运行中</small></div><i>■</i></div>
+                <div class="mock-task"><div><b>构建项目</b><small>一次任务</small></div><i>▶</i></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="feature-story feature-story-reverse reveal">
+            <div class="story-copy">
+              <span class="story-index">02 / 运行与日志</span>
+              <h3>同时运行，<br />也始终分得清。</h3>
+              <p>同一项目的多个任务可以并行运行，每一次启动都有独立状态与日志。哪里出错、何时结束、该停止哪个任务，都清清楚楚。</p>
+              <ul class="check-list">
+                <li><span>✓</span> 实时区分正常输出与错误信息</li>
+                <li><span>✓</span> 独立查看并停止指定运行任务</li>
+                <li><span>✓</span> 本地链接可直接打开或复制</li>
+              </ul>
+            </div>
+            <div class="story-visual log-visual" data-parallax-media aria-label="运行日志功能示意">
+              <div class="log-toolbar"><strong>运行日志</strong><span>全部　 stdout　 stderr</span></div>
+              <div class="log-lines">
+                <p><time>09:41:02</time><b>系统</b><span>正在启动「开发服务器」</span></p>
+                <p><time>09:41:03</time><b>输出</b><span>Local: <u>http://localhost:4175/</u></span></p>
+                <p><time>09:41:03</time><b>输出</b><span>ready in 428 ms</span></p>
+                <p class="log-success"><time>09:41:04</time><b>状态</b><span>任务已进入运行状态</span></p>
+                <span class="log-cursor"></span>
+              </div>
+              <div class="run-list"><span><i></i>开发服务器</span><b>运行中</b><em>28708</em></div>
+            </div>
+          </div>
+
+          <div class="feature-list reveal">
+            <article>
+              <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l1.5 2H20v9.5H4V7.5Z"/><path d="M4 7.5V5h5l1.5 2H20v2.5"/></svg></span>
+              <h3>从熟悉的编辑器导入</h3>
+              <p>从 VS Code 或 Cursor 的最近项目中勾选导入，已有项目自动跳过。</p>
+            </article>
+            <article>
+              <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3a7 7 0 0 0-7 7v4l-2 3h18l-2-3v-4a7 7 0 0 0-7-7Z"/><path d="M9.5 20h5"/></svg></span>
+              <h3>任务结束，及时知道</h3>
+              <p>窗口在后台时，桌面通知会告诉你任务成功完成，还是遇到了问题。</p>
+            </article>
+            <article>
+              <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2.5"/></svg></span>
+              <h3>安静待在系统托盘</h3>
+              <p>关闭窗口后继续在后台守候，需要时随时回来，不打断正在运行的任务。</p>
+            </article>
+            <article>
+              <span class="feature-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12a7 7 0 0 1 12-4.9L19 9"/><path d="M19 5v4h-4M19 12a7 7 0 0 1-12 4.9L5 15"/><path d="M5 19v-4h4"/></svg></span>
+              <h3>更新简单，也有分寸</h3>
+              <p>发现新版本后由你确认安装；有任务运行时，会先安全停止再继续。</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="stack-section" data-marquee-section aria-labelledby="stack-title">
+        <div class="stack-category-marquee" data-marquee="categories" aria-hidden="true">
+          <div class="stack-marquee-runner" data-marquee-runner>
+            <div class="stack-category-group" data-marquee-group>
+              <span><i></i>前端项目</span>
+              <span><i></i>后端服务</span>
+              <span><i></i>构建任务</span>
+              <span><i></i>自动化脚本</span>
+              <span><i></i>临时命令</span>
+              <span><i></i>桌面工具</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="shell stack-center reveal">
+          <p class="kicker">常见项目，都能归位</p>
+          <h2 id="stack-title">你熟悉的项目，都能在这里运行。</h2>
+          <p>只要能通过本地命令启动，就能交给 Runvoke 集中管理。</p>
+          <span class="stack-motion-hint"><i aria-hidden="true">↕</i> 自动滚动 · 滚动页面可加速</span>
+        </div>
+
+        <div class="stack-card-marquee" data-marquee="cards" role="region" aria-label="Runvoke 可管理的常见项目技术栈">
+          <div class="stack-marquee-runner" data-marquee-runner>
+            <ul class="stack-card-group" data-marquee-group>
+            <li>
+              <span class="stack-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M3 6h7l6 10L22 6h7L16 28 3 6Z"/><path d="M10 6h4l2 3.5L18 6h4l-6 10.5L10 6Z"/></svg></span>
+              <div><strong>Vue</strong><small>前端项目</small></div>
+            </li>
+            <li>
+              <span class="stack-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="2.3"/><ellipse cx="16" cy="16" rx="13" ry="5.2"/><ellipse cx="16" cy="16" rx="13" ry="5.2" transform="rotate(60 16 16)"/><ellipse cx="16" cy="16" rx="13" ry="5.2" transform="rotate(120 16 16)"/></svg></span>
+              <div><strong>React</strong><small>前端项目</small></div>
+            </li>
+            <li>
+              <span class="stack-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="m16 3 11 6.5v13L16 29 5 22.5v-13L16 3Z"/><path d="M11 21V11l10 10V11"/></svg></span>
+              <div><strong>Node.js</strong><small>服务端项目</small></div>
+            </li>
+            <li>
+              <span class="stack-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="12"/><path d="M11 22V10h6.2c3 0 4.8 1.6 4.8 4.2 0 2-1.1 3.4-3.1 3.9L22 22M11 17h6"/></svg></span>
+              <div><strong>Rust</strong><small>桌面与服务</small></div>
+            </li>
+            <li>
+              <span class="stack-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M16 4c-5.5 0-7 2-7 5v4h8v2H8c-3 0-5 2.3-5 5.5S5 26 8 26h4v-4.5c0-3 2-5.5 5-5.5h6c3.5 0 6-2.5 6-6s-2.5-6-6-6h-7Z"/><circle cx="21.5" cy="8.5" r="1"/><path d="M16 28c5.5 0 7-2 7-5v-4h-8v-2h9c3 0 5-2.3 5-5.5"/></svg></span>
+              <div><strong>Python</strong><small>脚本与服务</small></div>
+            </li>
+            <li>
+              <span class="stack-icon stack-icon-word" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M3 11h7M1 16h8M3 21h7"/><text x="10" y="21">GO</text></svg></span>
+              <div><strong>Go</strong><small>服务端项目</small></div>
+            </li>
+            <li>
+              <span class="stack-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M9 20h13v2.5c0 3-2.7 5.5-6.5 5.5S9 25.5 9 22.5V20Z"/><path d="M22 21h2c2 0 3-1 3-2.5S26 16 24 16h-2M12 16c5-2 8-4 6-7M16 14c-3-3 5-4 3-8M13 11c-2-2 3-3 2-6"/></svg></span>
+              <div><strong>Java</strong><small>服务端项目</small></div>
+            </li>
+            <li>
+              <span class="stack-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="m16 28 12-23-12 4-5-4-7 2 12 21Z"/><path d="m17 8-5 10 5-2-2 8 7-11-5 2V8Z"/></svg></span>
+              <div><strong>Vite</strong><small>开发工具</small></div>
+            </li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="section local-section" aria-labelledby="local-title">
+        <div class="local-grid" aria-hidden="true"></div>
+        <div class="shell local-layout">
+          <div class="local-copy reveal">
+            <p class="local-path">C:\Users\you\Runvoke</p>
+            <p class="kicker">只在你的电脑上工作</p>
+            <h2 id="local-title">你的项目，<br />不必离开你的电脑。</h2>
+            <p>Runvoke 只做一件事：在本机替你整理并执行明确配置的命令。它不会上传项目，也不会改变你的开发方式。</p>
+          </div>
+          <ol class="local-principles reveal reveal-delay-1">
+            <li><b>01</b><div><strong>不上传项目</strong><span>配置、状态和日志都保存在本机。</span></div></li>
+            <li><b>02</b><div><strong>不接管项目</strong><span>依赖、构建和部署仍由你决定。</span></div></li>
+            <li><b>03</b><div><strong>不擅自运行</strong><span>导入项目前先确认，命令由你启动。</span></div></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section workflow-section" id="workflow">
+        <div class="shell workflow-layout">
+          <div class="section-heading reveal">
+            <p class="kicker">使用方式</p>
+            <h2>三步，进入专注状态。</h2>
+            <p>没有复杂的初始化流程。把日常项目放进来，之后的启动与观察都留在同一处。</p>
+          </div>
+          <ol class="workflow-steps reveal reveal-delay-1">
+            <li><b>01</b><div><h3>添加项目</h3><p>选择本地项目目录，确认名称和常用任务。</p></div></li>
+            <li><b>02</b><div><h3>启动任务</h3><p>点击运行开发服务、构建任务，或输入临时命令。</p></div></li>
+            <li><b>03</b><div><h3>观察结果</h3><p>在运行记录与实时日志里掌握每一次执行。</p></div></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section experience-section" id="experience">
+        <div class="shell">
+          <div class="section-heading centered reveal">
+            <p class="kicker">桌面体验</p>
+            <h2>白天清爽，夜里安静。</h2>
+            <p>浅色与深色主题都为长时间使用而设计。你的主题选择、项目分组和侧栏宽度都会被记住。</p>
+          </div>
+          <div class="theme-showcase reveal">
+            <figure class="showcase-light">
+              <figcaption><span></span>浅色主题</figcaption>
+              <img src="./assets/project-workspace-light.webp" width="1775" height="1276" loading="lazy" decoding="async" alt="Runvoke 浅色主题工作台" />
+            </figure>
+            <figure class="showcase-dark">
+              <figcaption><span></span>深色主题</figcaption>
+              <img src="./assets/workspace-empty-dark.webp" width="1684" height="1127" loading="lazy" decoding="async" alt="Runvoke 深色主题工作台" />
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="section download-section" id="download">
+        <div class="download-grid" aria-hidden="true"></div>
+        <div class="shell download-inner reveal">
+          <img class="download-icon" src="./assets/icon.png" alt="" width="88" height="88" />
+          <p class="kicker">开始使用</p>
+          <h2>少一点窗口，<br />多一点专注。</h2>
+          <p>免费下载 Runvoke，把今天要运行的项目，放进一个井然有序的工作台。</p>
+          <div class="download-actions">
+            <a class="button button-primary download-button" href="https://github.com/GezelligheidLin/Runvoke/releases/latest" target="_blank" rel="noreferrer">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 4.5 10.5 3v8H3V4.5Zm9 6.5V2.7L21 1v10h-9ZM3 12.5h7.5v8L3 19v-6.5Zm9 0h9v10l-9-1.7v-8.3Z"/></svg>
+              获取 Windows 安装包
+            </a>
+            <a class="download-history" href="https://github.com/GezelligheidLin/Runvoke/releases" target="_blank" rel="noreferrer">查看历史版本 <span aria-hidden="true">↗</span></a>
+          </div>
+          <span class="download-note">当前版本 v0.1.13 · 免费使用 · 通过 GitHub Releases 下载</span>
+        </div>
+      </section>
+
+      <section class="section faq-section">
+        <div class="shell faq-layout">
+          <div class="section-heading reveal">
+            <p class="kicker">常见问题</p>
+            <h2>下载前，你可能还想知道。</h2>
+          </div>
+          <div class="faq-list reveal reveal-delay-1">
+            <details>
+              <summary>Runvoke 会上传我的项目或命令吗？<span></span></summary>
+              <p>不会。项目配置、运行状态和日志都保存在你的电脑上，Runvoke 只执行你明确配置的本地命令。</p>
+            </details>
+            <details>
+              <summary>它适合管理哪些项目？<span></span></summary>
+              <p>只要项目能通过本地命令启动，就可以加入 Runvoke。开发服务、后端服务、构建任务、脚本和临时检查都能统一管理。</p>
+            </details>
+            <details>
+              <summary>同一个项目可以同时运行多个任务吗？<span></span></summary>
+              <p>可以。每一次运行都有独立记录、状态和日志，你可以准确查看或停止其中任意一个。</p>
+            </details>
+            <details>
+              <summary>目前支持哪些系统？<span></span></summary>
+              <p>当前正式版本面向 Windows。其他系统版本尚未提供，请关注项目主页的后续动态。</p>
+            </details>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="shell footer-main">
+        <div>
+          <a class="brand" href="#top"><img src="./assets/icon.png" alt="" width="34" height="34" /><span>Runvoke</span></a>
+          <p>让本地项目井然有序。</p>
+        </div>
+        <div class="footer-links">
+          <a href="#features">功能</a>
+          <a href="#download">下载</a>
+          <a href="https://github.com/GezelligheidLin/Runvoke" target="_blank" rel="noreferrer">GitHub</a>
+          <a href="https://github.com/GezelligheidLin/Runvoke/issues" target="_blank" rel="noreferrer">问题反馈</a>
+        </div>
+      </div>
+      <div class="shell footer-bottom"><span>© <span data-year></span> Runvoke</span><span>为安静、高效的本地开发而做。</span></div>
+    </footer>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

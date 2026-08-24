@@ -1,12 +1,15 @@
 {
   "name": "runvoke",
   "private": true,
-  "version": "0.1.16-dev.1",
+  "version": "0.1.17",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
+    "website:dev": "vite --config vite.website.config.ts",
+    "website:build": "vite build --config vite.website.config.ts",
+    "website:preview": "vite preview --config vite.website.config.ts",
     "typecheck": "vue-tsc -b",
     "tauri": "tauri"
   },

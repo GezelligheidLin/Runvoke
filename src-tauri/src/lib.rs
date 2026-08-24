@@ -70,6 +70,15 @@ struct ProjectGroup {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct OpenSourceConfig {
+    id: String,
+    name: String,
+    executable: String,
+    arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectTask {
     id: String,
     name: String,
@@ -124,6 +133,8 @@ struct StoreFile {
     #[serde(default)]
     groups: Vec<ProjectGroup>,
     #[serde(default)]
+    open_sources: Vec<OpenSourceConfig>,
+    #[serde(default)]
     mcp: McpConfig,
 }
 
@@ -140,6 +151,87 @@ struct McpConfig {
 
 const fn default_mcp_port() -> u16 {
     38_465
+}
+
+fn default_open_sources() -> Vec<OpenSourceConfig> {
+    vec![
+        OpenSourceConfig {
+            id: "vscode".into(),
+            name: "Visual Studio Code".into(),
+            executable: "code".into(),
+            arguments: "\"{directory}\"".into(),
+        },
+        OpenSourceConfig {
+            id: "zed".into(),
+            name: "Zed".into(),
+            executable: "zed".into(),
+            arguments: "\"{directory}\"".into(),
+        },
+    ]
+}
+
+fn source_uses_reserved_shell(executable: &str) -> bool {
+    let name = Path::new(executable)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(executable)
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "cmd"
+            | "command"
+            | "powershell"
+            | "pwsh"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "wscript"
+            | "cscript"
+    )
+}
+
+fn validate_open_source(source: &OpenSourceConfig) -> Result<(), String> {
+    if source.id.trim().is_empty() || source.id.len() > 64 {
+        return Err("软件源标识无效".into());
+    }
+    if source.name.trim().is_empty() || source.name.len() > 120 {
+        return Err("软件源名称不能为空且不能超过 120 个字符".into());
+    }
+    if source.executable.trim().is_empty() || source.executable.len() > 1_024 {
+        return Err("软件源程序路径不能为空且不能超过 1024 个字符".into());
+    }
+    if source_uses_reserved_shell(source.executable.trim())
+        || matches!(
+            Path::new(source.executable.trim())
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str(),
+            "bat" | "cmd" | "ps1" | "sh"
+        )
+    {
+        return Err("软件源不能直接配置 shell 程序，请填写编辑器或其他直接启动的程序".into());
+    }
+    if source.arguments.len() > 4_096
+        || source.id.chars().any(char::is_control)
+        || source.name.chars().any(char::is_control)
+        || source.executable.chars().any(char::is_control)
+        || source.arguments.chars().any(char::is_control)
+    {
+        return Err("软件源配置包含无效字符或过长内容".into());
+    }
+    if !source.arguments.contains("{directory}") {
+        return Err("打开目录的参数中必须包含 {directory}".into());
+    }
+    Ok(())
+}
+
+fn normalize_open_sources(sources: &mut Vec<OpenSourceConfig>) {
+    sources.retain(|source| validate_open_source(source).is_ok());
+    let mut seen = HashSet::new();
+    sources.retain(|source| seen.insert(source.id.clone()));
 }
 
 impl Default for McpConfig {
@@ -338,11 +430,30 @@ fn store_path(app: &AppHandle) -> Result<PathBuf, String> {
 fn load_store(app: &AppHandle) -> Result<StoreFile, String> {
     let path = store_path(app)?;
     if !path.exists() {
-        return Ok(StoreFile::default());
+        let mut store = StoreFile::default();
+        store.open_sources = default_open_sources();
+        save_store(app, &store)?;
+        return Ok(store);
     }
 
     let content = fs::read_to_string(&path).map_err(|error| format!("无法读取配置：{error}"))?;
-    serde_json::from_str(&content).map_err(|error| format!("配置文件格式无效：{error}"))
+    let mut store: StoreFile =
+        serde_json::from_str(&content).map_err(|error| format!("配置文件格式无效：{error}"))?;
+    let has_open_sources = serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|value| value.get("openSources").cloned())
+        .is_some();
+    if !has_open_sources {
+        store.open_sources = default_open_sources();
+        save_store(app, &store)?;
+        return Ok(store);
+    }
+    let source_count = store.open_sources.len();
+    normalize_open_sources(&mut store.open_sources);
+    if source_count == 0 || store.open_sources.len() != source_count {
+        save_store(app, &store)?;
+    }
+    Ok(store)
 }
 
 fn save_store(app: &AppHandle, store: &StoreFile) -> Result<(), String> {
@@ -821,6 +932,29 @@ fn suggested_project_command(directory: &Path) -> Option<String> {
         return Some("python main.py".into());
     }
     None
+}
+
+#[tauri::command]
+fn inspect_dropped_project(directory: String) -> Result<ImportedProject, String> {
+    let canonical_directory = PathBuf::from(directory.trim())
+        .canonicalize()
+        .map_err(|_| "拖入路径不存在或无法访问".to_owned())?;
+    if !canonical_directory.is_dir() {
+        return Err("拖入路径不是文件夹".into());
+    }
+    let name = canonical_directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "无法从拖入目录推断项目名称".to_owned())?
+        .to_owned();
+
+    Ok(ImportedProject {
+        name,
+        directory: display_directory(&canonical_directory.to_string_lossy()),
+        source: "拖入目录".into(),
+        suggested_command: suggested_project_command(&canonical_directory),
+    })
 }
 
 fn list_editor_projects(
@@ -1801,6 +1935,202 @@ fn list_runtime_status(
     */
 }
 
+fn parse_open_source_arguments(arguments: &str) -> Result<Vec<String>, String> {
+    let mut parsed = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+
+    for character in arguments.chars() {
+        match quote {
+            Some(active) if character == active => quote = None,
+            Some(_) => current.push(character),
+            None if character == '\'' || character == '"' => quote = Some(character),
+            None if character.is_whitespace() => {
+                if !current.is_empty() {
+                    parsed.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(character),
+        }
+    }
+    if quote.is_some() {
+        return Err("软件源参数包含未闭合的引号".into());
+    }
+    if !current.is_empty() {
+        parsed.push(current);
+    }
+    Ok(parsed)
+}
+
+fn launch_open_source(
+    executable: &str,
+    arguments: &[String],
+    directory: &Path,
+    source_name: &str,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::{iter::once, os::windows::ffi::OsStrExt, ptr::null_mut};
+        use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+
+        fn wide(value: &str) -> Vec<u16> {
+            std::ffi::OsStr::new(value)
+                .encode_wide()
+                .chain(once(0))
+                .collect()
+        }
+
+        fn quote_argument(value: &str) -> String {
+            format!("\"{}\"", value.replace('"', "\\\""))
+        }
+
+        let working_directory = directory.to_string_lossy();
+        let executable_wide = wide(executable);
+        let parameters = arguments
+            .iter()
+            .map(|argument| quote_argument(argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let parameters_wide = wide(&parameters);
+        let directory_wide = wide(&working_directory);
+        let operation_wide = wide("open");
+        let result = unsafe {
+            ShellExecuteW(
+                null_mut(),
+                operation_wide.as_ptr(),
+                executable_wide.as_ptr(),
+                parameters_wide.as_ptr(),
+                directory_wide.as_ptr(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if (result as isize) <= 32 {
+            let reason = match result as isize {
+                2 => "找不到文件",
+                3 => "找不到路径",
+                5 => "系统拒绝访问",
+                8 => "内存不足",
+                26 => "无法共享打开的文件",
+                27 => "文件关联不完整",
+                28 => "DDE 操作超时",
+                29 => "DDE 操作失败",
+                30 => "DDE 忙",
+                31 => "没有文件关联的应用程序",
+                _ => "Windows 无法打开该程序",
+            };
+            return Err(format!(
+                "无法启动 {source_name}：{reason}，请检查程序路径和参数"
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut command = Command::new(executable);
+        command
+            .args(arguments)
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.spawn().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "无法启动 {source_name}：找不到程序，请在设置中选择可执行文件或确认已加入 PATH"
+                )
+            } else {
+                format!("无法启动 {source_name}：{error}")
+            }
+        })?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+fn list_open_sources(app: AppHandle) -> Result<Vec<OpenSourceConfig>, String> {
+    let mut store = load_store(&app)?;
+    normalize_open_sources(&mut store.open_sources);
+    save_store(&app, &store)?;
+    Ok(store.open_sources)
+}
+
+#[tauri::command]
+fn save_open_source(
+    app: AppHandle,
+    mut source: OpenSourceConfig,
+) -> Result<OpenSourceConfig, String> {
+    source.id = source.id.trim().to_owned();
+    source.name = source.name.trim().to_owned();
+    source.executable = source.executable.trim().to_owned();
+    source.arguments = source.arguments.trim().to_owned();
+    validate_open_source(&source)?;
+
+    let mut store = load_store(&app)?;
+    if let Some(existing) = store
+        .open_sources
+        .iter_mut()
+        .find(|item| item.id == source.id)
+    {
+        *existing = source.clone();
+    } else {
+        store.open_sources.push(source.clone());
+    }
+    normalize_open_sources(&mut store.open_sources);
+    save_store(&app, &store)?;
+    Ok(source)
+}
+
+#[tauri::command]
+fn delete_open_source(app: AppHandle, source_id: String) -> Result<(), String> {
+    let source_id = source_id.trim();
+    if source_id.is_empty() {
+        return Err("软件源标识不能为空".into());
+    }
+    let mut store = load_store(&app)?;
+    let original_len = store.open_sources.len();
+    store.open_sources.retain(|source| source.id != source_id);
+    if store.open_sources.len() == original_len {
+        return Err("软件源不存在".into());
+    }
+    normalize_open_sources(&mut store.open_sources);
+    save_store(&app, &store)
+}
+
+#[tauri::command]
+fn open_with_source(app: AppHandle, source_id: String, directory: String) -> Result<(), String> {
+    let directory_path = Path::new(&directory);
+    if !directory_path.is_dir() {
+        return Err("项目目录不存在".into());
+    }
+
+    let store = load_store(&app)?;
+    let source = store
+        .open_sources
+        .iter()
+        .find(|source| source.id == source_id.trim())
+        .ok_or_else(|| "软件源不存在".to_owned())?;
+    validate_open_source(source)?;
+    let expanded_arguments = source.arguments.replace("{directory}", "\u{e000}");
+    let arguments = parse_open_source_arguments(&expanded_arguments)?
+        .into_iter()
+        .map(|argument| argument.replace('\u{e000}', &directory))
+        .collect::<Vec<_>>();
+    if arguments.is_empty() {
+        return Err("软件源没有可执行的打开参数".into());
+    }
+
+    launch_open_source(&source.executable, &arguments, directory_path, &source.name)?;
+    emit_log(
+        &app,
+        "app",
+        "app",
+        "system",
+        &format!("已请求 {} 打开项目", source.name),
+    );
+    Ok(())
+}
+
 #[tauri::command]
 fn open_in_vscode(app: AppHandle, directory: String) -> Result<(), String> {
     if !Path::new(&directory).is_dir() {
@@ -2499,6 +2829,27 @@ mod tests {
     }
 
     #[test]
+    fn inspects_dropped_directory_by_folder_name() {
+        let directory = std::env::temp_dir().join(format!("runvoke-drop-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("package.json"),
+            r#"{ "name": "manifest-name", "scripts": { "dev": "vite" } }"#,
+        )
+        .unwrap();
+
+        let inspected = inspect_dropped_project(directory.to_string_lossy().into_owned()).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
+
+        assert_eq!(
+            inspected.name,
+            directory.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(inspected.source, "拖入目录");
+        assert_eq!(inspected.suggested_command.as_deref(), Some("pnpm dev"));
+    }
+
+    #[test]
     fn positions_notification_inside_monitor_work_area() {
         assert_eq!(
             notification_window_coordinates(
@@ -2559,6 +2910,7 @@ pub fn run() {
             get_project_git_status,
             list_project_groups,
             detect_project_name,
+            inspect_dropped_project,
             list_vscode_projects,
             list_cursor_projects,
             get_mcp_server_status,
@@ -2577,6 +2929,10 @@ pub fn run() {
             dismiss_run,
             dismiss_inactive_runs,
             list_runtime_status,
+            list_open_sources,
+            save_open_source,
+            delete_open_source,
+            open_with_source,
             open_in_vscode,
             open_in_file_manager,
             open_project_config_directory,
