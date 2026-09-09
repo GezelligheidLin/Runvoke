@@ -25,6 +25,7 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 use uuid::Uuid;
 
 mod mcp_server;
+mod task_shell;
 mod window_resize_guard;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1497,18 +1498,20 @@ fn pipe_logs<R: Read + Send + 'static>(
     });
 }
 
-fn shell_command(command_line: &str) -> Command {
+fn shell_command(command_line: &str) -> Result<Command, String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         // Keep the user's PowerShell profile so fnm and other shell-managed tools are available.
-        let script = format!("& {{ {command_line} }}");
-        let mut command = Command::new("pwsh.exe");
+        let script = format!(
+            "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $OutputEncoding = [Console]::OutputEncoding; & {{ {command_line} }}"
+        );
+        let mut command = Command::new(task_shell::resolve_powershell()?);
         command
             .args(["-NoLogo", "-NonInteractive", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW);
-        command
+        Ok(command)
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1516,7 +1519,7 @@ fn shell_command(command_line: &str) -> Command {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new("sh");
         command.args(["-lc", command_line]).process_group(0);
-        command
+        Ok(command)
     }
 }
 
@@ -1554,7 +1557,7 @@ fn start_task_inner(
     }
 
     let run_id = Uuid::new_v4().to_string();
-    let mut command = shell_command(&task.command);
+    let mut command = shell_command(&task.command)?;
     command
         .current_dir(&project.directory)
         .stdin(Stdio::null())

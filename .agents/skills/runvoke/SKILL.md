@@ -41,6 +41,8 @@ description: 在 Runvoke 桌面项目启动器中实现、验证和交付功能�
 
 ## 验证清单
 
+Windows 启动根据当前用户和系统环境变量探测 PATH、常见安装目录及 Microsoft Store 执行别名中的 PowerShell 7，不绑定个人路径或具体安装版本；缺失时回退到系统 Windows PowerShell。验证无 `pwsh` 环境中的命令执行、Profile 加载、UTF-8 日志、失败退出码及停止回收。
+
 ```bash
 pnpm typecheck
 pnpm build

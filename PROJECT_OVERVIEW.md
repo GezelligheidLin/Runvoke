@@ -63,6 +63,8 @@ README.md            面向使用者的安装与运行说明
 
 环境要求：Node.js 20+、pnpm 10+、Rust stable，以及 Tauri 2 在 Windows 上要求的开发环境。
 
+Windows 任务优先使用 PowerShell 7（PATH、常见安装目录或 Microsoft Store 执行别名），未安装时回退到系统自带的 Windows PowerShell；所有目录根据当前用户和系统环境变量解析，不绑定用户名、盘符或具体安装版本，无需为运行任务额外安装 PowerShell 7。保留用户 Profile 加载、UTF-8 日志输出、隐藏终端窗口及运行实例进程树回收。
+
 ```bash
 pnpm install
 pnpm tauri dev
