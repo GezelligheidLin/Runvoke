@@ -312,6 +312,7 @@ struct ImportedProject {
 
 struct ManagedProcess {
     child: Child,
+    pid: u32,
     #[cfg(target_os = "windows")]
     job: JobHandle,
 }
@@ -380,6 +381,135 @@ impl JobHandle {
             ))
         } else {
             Ok(())
+        }
+    }
+
+    fn terminate_tree(&self, root_pid: u32) -> Result<(), String> {
+        // A process can create children in the small window between spawn() and
+        // AssignProcessToJobObject(). Attach every currently known descendant
+        // before terminating the job, then terminate any process that could not
+        // be assigned (for example, one already belonging to another job).
+        let mut last_error = None;
+        for attempt in 0..3 {
+            let pids = process_tree_pids(root_pid);
+            for pid in &pids {
+                if *pid == std::process::id() {
+                    continue;
+                }
+                if let Err(error) = assign_process_to_job(self.0, *pid) {
+                    last_error = Some(error);
+                }
+            }
+            if attempt == 0 {
+                if let Err(error) = self.terminate() {
+                    last_error = Some(error);
+                }
+            }
+            for pid in pids {
+                terminate_process_by_pid(pid);
+            }
+            if attempt < 2 {
+                thread::sleep(Duration::from_millis(80));
+            }
+        }
+        if process_tree_pids(root_pid).is_empty() {
+            Ok(())
+        } else {
+            Err(last_error.unwrap_or_else(|| "Windows 子进程树仍有进程未退出".into()))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn assign_process_to_job(
+    job: windows_sys::Win32::Foundation::HANDLE,
+    pid: u32,
+) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        AssignProcessToJobObject, OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        return Err(format!(
+            "无法打开子进程 {pid}：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let assigned = unsafe { AssignProcessToJobObject(job, handle) };
+    unsafe { CloseHandle(handle) };
+    if assigned == 0 {
+        return Err(format!(
+            "无法将子进程 {pid} 加入 Windows Job Object：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_process_by_pid(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if !handle.is_null() {
+        unsafe {
+            let _ = TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn process_tree_pids(root_pid: u32) -> Vec<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
+    let mut parent_by_pid = HashMap::new();
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while ok {
+        parent_by_pid.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+        ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+
+    let mut tree = HashSet::new();
+    if parent_by_pid.contains_key(&root_pid) {
+        tree.insert(root_pid);
+    }
+    loop {
+        let before = tree.len();
+        for (&pid, &parent) in &parent_by_pid {
+            if parent == root_pid || tree.contains(&parent) {
+                tree.insert(pid);
+            }
+        }
+        if tree.len() == before {
+            break;
+        }
+    }
+    tree.into_iter().collect()
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_process_tree_without_job(root_pid: u32) {
+    for attempt in 0..3 {
+        for pid in process_tree_pids(root_pid) {
+            terminate_process_by_pid(pid);
+        }
+        if attempt < 2 {
+            thread::sleep(Duration::from_millis(80));
         }
     }
 }
@@ -1503,13 +1633,10 @@ fn shell_command(command_line: &str) -> Result<Command, String> {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        // Keep the user's PowerShell profile so fnm and other shell-managed tools are available.
-        let script = format!(
-            "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $OutputEncoding = [Console]::OutputEncoding; & {{ {command_line} }}"
-        );
+        let script = task_shell::powershell_script(command_line);
         let mut command = Command::new(task_shell::resolve_powershell()?);
         command
-            .args(["-NoLogo", "-NonInteractive", "-Command", &script])
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW);
         Ok(command)
     }
@@ -1572,6 +1699,7 @@ fn start_task_inner(
         .map_err(|error| format!("启动失败：{error}"))?;
     #[cfg(target_os = "windows")]
     let job = JobHandle::attach(&child).map_err(|error| {
+        terminate_process_tree_without_job(child.id());
         let _ = child.kill();
         error
     })?;
@@ -1604,6 +1732,7 @@ fn start_task_inner(
             run_id.clone(),
             ManagedProcess {
                 child,
+                pid,
                 #[cfg(target_os = "windows")]
                 job,
             },
@@ -1699,7 +1828,7 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<Option<Ex
 
 #[cfg(target_os = "windows")]
 fn terminate_process_tree(process: &ManagedProcess) -> Result<(), String> {
-    process.job.terminate()
+    process.job.terminate_tree(process.pid)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1723,6 +1852,7 @@ fn stop_run_inner(
         .get(run_id)
         .cloned()
         .ok_or_else(|| "未找到运行实例".to_owned())?;
+    let was_stopping = status.state == "stopping";
     status.state = "stopping".into();
     state
         .runs
@@ -1738,6 +1868,9 @@ fn stop_run_inner(
         .remove(run_id);
 
     let Some(mut process) = process else {
+        if was_stopping {
+            return Err("任务正在停止，请稍后重试".into());
+        }
         status.state = "stopped".into();
         status.pid = None;
         state
@@ -1757,16 +1890,17 @@ fn stop_run_inner(
             None
         }
     };
-    if exit_status.is_none() {
-        if let Err(error) = terminate_process_tree(&process) {
-            termination_messages.push(error);
-        }
-        exit_status = wait_for_child_exit(&mut process.child, Duration::from_secs(3))
-            .unwrap_or_else(|error| {
-                termination_messages.push(error);
-                None
-            });
+    // Always terminate the managed tree, even when the shell process has
+    // already exited. A detached dev-server child can outlive PowerShell.
+    if let Err(error) = terminate_process_tree(&process) {
+        termination_messages.push(error);
     }
+    exit_status = wait_for_child_exit(&mut process.child, Duration::from_secs(3))
+        .unwrap_or_else(|error| {
+            termination_messages.push(error);
+            None
+        })
+        .or(exit_status);
     if exit_status.is_none() {
         if let Err(error) = process.child.kill() {
             termination_messages.push(format!("强制结束主进程失败：{error}"));
@@ -1776,6 +1910,25 @@ fn stop_run_inner(
                 termination_messages.push(error);
                 None
             });
+    }
+    #[cfg(target_os = "windows")]
+    let tree_alive = !process_tree_pids(process.pid).is_empty();
+    #[cfg(not(target_os = "windows"))]
+    let tree_alive = false;
+    if exit_status.is_none() || tree_alive {
+        state
+            .processes
+            .lock()
+            .map_err(|_| "进程状态锁已损坏")?
+            .insert(run_id.to_owned(), process);
+        status.state = "stopping".into();
+        state
+            .runs
+            .lock()
+            .map_err(|_| "进程状态锁已损坏")?
+            .insert(run_id.to_owned(), status.clone());
+        let _ = app.emit("project-status", status);
+        return Err("停止任务超时，仍有进程未退出，请稍后重试".into());
     }
     let exit_code = exit_status.and_then(|status| status.code());
     status.state = "stopped".into();

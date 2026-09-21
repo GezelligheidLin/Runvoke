@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from "vue";
-import { open } from "@tauri-apps/plugin-dialog";
+import {
+    nextTick,
+    onBeforeUnmount,
+    onMounted,
+    ref,
+    useTemplateRef,
+} from "vue";
 import CursorIcon from "./CursorIcon.vue";
+import OpenSourceManagerDialog from "./OpenSourceManagerDialog.vue";
 import ResizableSplitPane from "./ResizableSplitPane.vue";
-import OverflowTooltip from "./OverflowTooltip.vue";
 import vscodeIcon from "../assets/vscode.svg";
 import type {
     McpServerStatus,
@@ -72,8 +77,9 @@ const projectImportTrigger = useTemplateRef<HTMLButtonElement>(
 );
 const projectImportMenu = useTemplateRef<HTMLElement>("projectImportMenu");
 const projectImportMenuPosition = ref({ top: 0, left: 0, width: 208 });
-const sourceDrafts = ref<OpenSourceConfig[]>([]);
-const expandedSourceId = ref<string | null>(null);
+const openSourceManagerOpen = ref(false);
+const openSourceManagerButton =
+    useTemplateRef<HTMLButtonElement>("openSourceManagerButton");
 const notificationPositions: Array<{
     value: NotificationPosition;
     label: string;
@@ -86,69 +92,13 @@ const notificationPositions: Array<{
     { value: "bottom-right", label: "右下" },
 ];
 
-watch(
-    () => props.openSources,
-    (sources) => {
-        sourceDrafts.value = sources.map((source) => ({ ...source }));
-    },
-    { immediate: true },
-);
-
-function addOpenSource() {
-    const id = `custom-${Date.now()}`;
-    sourceDrafts.value.push({
-        id,
-        name: "新软件",
-        executable: "",
-        arguments: '"{directory}"',
-    });
-    expandedSourceId.value = id;
-}
-
-function toggleSource(sourceId: string) {
-    expandedSourceId.value =
-        expandedSourceId.value === sourceId ? null : sourceId;
-}
-
-function saveSource(source: OpenSourceConfig) {
-    emit("saveOpenSource", { ...source });
-    expandedSourceId.value = null;
-}
-
-function deleteSource(source: OpenSourceConfig) {
-    if (!window.confirm(`确定删除“${source.name || "未命名软件"}”吗？`)) return;
-    if (!props.openSources.some((item) => item.id === source.id)) {
-        sourceDrafts.value = sourceDrafts.value.filter(
-            (item) => item.id !== source.id,
-        );
-        if (expandedSourceId.value === source.id) expandedSourceId.value = null;
-        return;
-    }
-    if (expandedSourceId.value === source.id) expandedSourceId.value = null;
-    emit("deleteOpenSource", source.id);
-}
-
-async function chooseExecutable(source: OpenSourceConfig) {
-    try {
-        const selected = await open({
-            multiple: false,
-            directory: false,
-            title: `选择${source.name || "软件"}的可执行文件`,
-            filters: [
-                {
-                    name: "应用程序",
-                    extensions: ["exe", "lnk", "app", "bin"],
-                },
-            ],
-        });
-        if (typeof selected === "string") source.executable = selected;
-    } catch {
-        // The native picker can be unavailable in the browser preview or cancelled.
-    }
-}
-
 function navigateTo(section: SettingsSection) {
     activeSection.value = section;
+}
+
+function closeOpenSourceManager() {
+    openSourceManagerOpen.value = false;
+    void nextTick(() => openSourceManagerButton.value?.focus());
 }
 
 function selectProjectImportSource(source: ProjectImportSource) {
@@ -622,171 +572,22 @@ onBeforeUnmount(() => {
                                         }}
                                     </button>
                                 </article>
-                                <article
-                                    class="settings-item settings-open-sources-heading"
-                                >
+                                <article class="settings-item">
                                     <div>
-                                        <strong>打开项目的软件源</strong>
+                                        <strong>项目打开方式</strong>
                                         <p>
-                                            配置项目菜单中用于打开目录的编辑器或其他软件。参数中使用
-                                            <code>{directory}</code>
-                                            代表当前项目目录。
+                                            统一管理项目菜单中可用的编辑器或其他软件。当前已配置
+                                            {{ openSources.length }} 个来源。
                                         </p>
                                     </div>
                                     <button
+                                        ref="openSourceManagerButton"
                                         class="settings-secondary-button"
                                         type="button"
-                                        @click="addOpenSource"
+                                        @click="openSourceManagerOpen = true"
                                     >
-                                        添加软件源
+                                        管理打开方式
                                     </button>
-                                </article>
-                                <article
-                                    v-for="source in sourceDrafts"
-                                    :key="source.id"
-                                    class="settings-open-source-item"
-                                    :class="{
-                                        expanded:
-                                            expandedSourceId === source.id,
-                                    }"
-                                >
-                                    <div class="settings-open-source-summary">
-                                        <div class="settings-open-source-title">
-                                            <OverflowTooltip
-                                                as="strong"
-                                                :text="
-                                                    source.name || '未命名软件'
-                                                "
-                                            >
-                                                {{
-                                                    source.name || "未命名软件"
-                                                }}
-                                            </OverflowTooltip>
-                                            <span
-                                                v-if="
-                                                    source.id === 'vscode' ||
-                                                    source.id === 'zed'
-                                                "
-                                                class="settings-open-source-badge"
-                                                >内置</span
-                                            >
-                                        </div>
-                                        <OverflowTooltip
-                                            as="code"
-                                            :text="
-                                                source.executable ||
-                                                '未配置程序'
-                                            "
-                                        >
-                                            {{
-                                                source.executable ||
-                                                "未配置程序"
-                                            }}
-                                        </OverflowTooltip>
-                                        <OverflowTooltip
-                                            as="code"
-                                            :text="
-                                                source.arguments || '未配置参数'
-                                            "
-                                        >
-                                            {{
-                                                source.arguments || "未配置参数"
-                                            }}
-                                        </OverflowTooltip>
-                                    </div>
-                                    <div
-                                        class="settings-open-source-row-actions"
-                                    >
-                                        <button
-                                            class="settings-secondary-button"
-                                            type="button"
-                                            :aria-expanded="
-                                                expandedSourceId === source.id
-                                            "
-                                            @click="toggleSource(source.id)"
-                                        >
-                                            {{
-                                                expandedSourceId === source.id
-                                                    ? "收起"
-                                                    : "编辑"
-                                            }}
-                                        </button>
-                                        <button
-                                            class="settings-secondary-button settings-delete-source-button"
-                                            type="button"
-                                            @click="deleteSource(source)"
-                                        >
-                                            删除
-                                        </button>
-                                    </div>
-                                    <div
-                                        v-if="expandedSourceId === source.id"
-                                        class="settings-open-source-editor"
-                                    >
-                                        <div
-                                            class="settings-open-source-fields"
-                                        >
-                                            <label>
-                                                <span>显示名称</span>
-                                                <input
-                                                    v-model="source.name"
-                                                    type="text"
-                                                    maxlength="120"
-                                                    placeholder="例如 Zed"
-                                                />
-                                            </label>
-                                            <label>
-                                                <span>程序路径或命令</span>
-                                                <div
-                                                    class="settings-open-source-executable"
-                                                >
-                                                    <input
-                                                        v-model="
-                                                            source.executable
-                                                        "
-                                                        type="text"
-                                                        maxlength="1024"
-                                                        placeholder="例如 zed 或完整路径"
-                                                    />
-                                                    <button
-                                                        class="settings-secondary-button"
-                                                        type="button"
-                                                        aria-label="选择可执行文件"
-                                                        title="选择可执行文件"
-                                                        @click="
-                                                            chooseExecutable(
-                                                                source,
-                                                            )
-                                                        "
-                                                    >
-                                                        选择
-                                                    </button>
-                                                </div>
-                                            </label>
-                                            <label
-                                                class="settings-open-source-arguments"
-                                            >
-                                                <span>打开目录的参数</span>
-                                                <input
-                                                    v-model="source.arguments"
-                                                    type="text"
-                                                    maxlength="4096"
-                                                    placeholder='例如 "{directory}" 或 --reuse-window "{directory}"'
-                                                />
-                                            </label>
-                                        </div>
-                                        <p class="settings-open-source-hint">
-                                            若提示找不到程序，请点击“选择”指定可执行文件，或确认程序已加入
-                                            PATH。
-                                        </p>
-                                        <button
-                                            class="settings-primary-button"
-                                            type="button"
-                                            @click="saveSource(source)"
-                                        >
-                                            保存
-                                        </button>
-                                    </div>
                                 </article>
                                 <article
                                     class="settings-item settings-import-item"
@@ -1124,6 +925,14 @@ onBeforeUnmount(() => {
                 </div>
             </template>
         </ResizableSplitPane>
+
+        <OpenSourceManagerDialog
+            :open="openSourceManagerOpen"
+            :sources="openSources"
+            @close="closeOpenSourceManager"
+            @save="emit('saveOpenSource', $event)"
+            @delete="emit('deleteOpenSource', $event)"
+        />
 
         <Teleport to="body">
             <Transition name="group-select-menu">

@@ -3,6 +3,30 @@
 use std::path::PathBuf;
 
 #[cfg(windows)]
+pub(crate) fn powershell_script(command_line: &str) -> String {
+    // Profile tools such as fnm emit UTF-8 PATH values. Configure decoding before
+    // loading profiles, otherwise non-ASCII paths can corrupt adjacent entries.
+    format!(
+        r#"[Console]::InputEncoding = New-Object System.Text.UTF8Encoding
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
+$OutputEncoding = [Console]::OutputEncoding
+foreach ($runvokeProfile in @($PROFILE.AllUsersAllHosts, $PROFILE.AllUsersCurrentHost, $PROFILE.CurrentUserAllHosts, $PROFILE.CurrentUserCurrentHost)) {{
+    if (Test-Path -LiteralPath $runvokeProfile) {{ . $runvokeProfile }}
+}}
+$global:LASTEXITCODE = 0
+& {{
+{command_line}
+$runvokeTaskSucceeded = $?
+if (-not $runvokeTaskSucceeded) {{
+    if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}
+    exit 1
+}}
+exit 0
+}}"#
+    )
+}
+
+#[cfg(windows)]
 fn select_shell(candidates: impl IntoIterator<Item = PathBuf>) -> Result<PathBuf, String> {
     candidates.into_iter().find(|path| path.is_file()).ok_or_else(|| {
         "启动失败：未找到 PowerShell 7 或 Windows PowerShell，请检查系统 PowerShell 安装及 PATH".into()
@@ -61,7 +85,12 @@ mod tests {
 
     #[test]
     fn resolved_shell_executes_commands_and_preserves_failure_exit_code() {
-        for (script, code) in [("Write-Output 'runvoke-shell-ok 中文'", 0), ("exit 7", 7)] {
+        for (script, code) in [
+            ("Write-Output 'runvoke-shell-ok 中文'", 0),
+            ("exit 7", 7),
+            ("cmd.exe /d /c exit 9", 9),
+            ("runvoke_command_that_does_not_exist_7ebc", 1),
+        ] {
             let output = crate::shell_command(script).unwrap().output().unwrap();
             assert_eq!(output.status.code(), Some(code));
             if code == 0 {
