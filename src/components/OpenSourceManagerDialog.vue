@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useTemplateRef, watch } from "vue";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import OverflowTooltip from "./OverflowTooltip.vue";
 import type { OpenSourceConfig } from "../types";
 
@@ -137,7 +137,7 @@ async function chooseExecutable() {
     const source = selectedSource.value;
     if (!source) return;
     try {
-        const selected = await open({
+        const selected = await openFileDialog({
             multiple: false,
             directory: false,
             title: `选择${source.name || "软件"}的可执行文件`,
