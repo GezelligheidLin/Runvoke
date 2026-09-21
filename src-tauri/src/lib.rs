@@ -426,8 +426,9 @@ fn assign_process_to_job(
     pid: u32,
 ) -> Result<(), String> {
     use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
     use windows_sys::Win32::System::Threading::{
-        AssignProcessToJobObject, OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
     };
     let handle = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
     if handle.is_null() {
