@@ -8,6 +8,7 @@ import {
 } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { applyLogEntry, type IncomingLog } from "../lib/logEntries";
 import type {
   LogEntry,
   OpenSourceConfig,
@@ -20,29 +21,12 @@ import type {
 
 const LOG_LIMIT = 2_000;
 const LOG_FLUSH_INTERVAL = 50;
-const LOG_MESSAGE_LIMIT = 16_000;
-
-type LogMode = "append" | "progress" | "finish";
-type IncomingLog = Omit<LogEntry, "id" | "transient"> & { mode?: LogMode };
 
 interface LauncherOptions {
   onRuntimeStatusChanged?: (
     status: RuntimeStatus,
     previous: RuntimeStatus,
   ) => void;
-}
-
-function stripTerminalControlSequences(message: string) {
-  const stripped = message
-    .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, "")
-    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
-  return stripped.length > LOG_MESSAGE_LIMIT
-    ? `${stripped.slice(0, LOG_MESSAGE_LIMIT)}… [单条日志过长，已截断]`
-    : stripped;
-}
-
-function isReplaceableProgress(message: string) {
-  return /\[webpack\.Progress\]\s+\d{1,3}%(?:\s|$)/i.test(message);
 }
 
 export function useLauncher(options: LauncherOptions = {}) {
@@ -121,43 +105,11 @@ export function useLauncher(options: LauncherOptions = {}) {
     for (const [runId, pending] of pendingLogsByRunId) {
       const entries = [...(nextLogs[runId] ?? [])];
       for (const incoming of pending) {
-        const { mode = "append", ...payload } = incoming;
-        const message = stripTerminalControlSequences(payload.message);
-        const effectiveMode: LogMode =
-          mode === "append" && isReplaceableProgress(message)
-            ? "progress"
-            : mode;
-        const entry: LogEntry = {
-          ...payload,
-          message,
-          id: `${payload.timestamp}-${++logSequence}`,
-          transient: effectiveMode === "progress",
-        };
-        let replaceIndex = -1;
-        if (effectiveMode !== "append") {
-          for (let index = entries.length - 1; index >= 0; index--) {
-            if (
-              entries[index]?.transient &&
-              entries[index]?.stream === entry.stream
-            ) {
-              replaceIndex = index;
-              break;
-            }
-          }
-        }
-        if (replaceIndex >= 0) entries[replaceIndex] = entry;
-        else {
-          if (effectiveMode === "append") {
-            for (let index = entries.length - 1; index >= 0; index--) {
-              const existing = entries[index];
-              if (existing?.transient && existing.stream === entry.stream) {
-                entries[index] = { ...existing, transient: false };
-                break;
-              }
-            }
-          }
-          entries.push(entry);
-        }
+        applyLogEntry(
+          entries,
+          incoming,
+          () => `${incoming.timestamp}-${++logSequence}`,
+        );
       }
       nextLogs[runId] = entries.slice(-LOG_LIMIT);
     }

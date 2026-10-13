@@ -28,9 +28,13 @@ exit 0
 
 #[cfg(windows)]
 fn select_shell(candidates: impl IntoIterator<Item = PathBuf>) -> Result<PathBuf, String> {
-    candidates.into_iter().find(|path| path.is_file()).ok_or_else(|| {
-        "启动失败：未找到 PowerShell 7 或 Windows PowerShell，请检查系统 PowerShell 安装及 PATH".into()
-    })
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            "启动失败：未找到 PowerShell 7 或 Windows PowerShell，请检查系统 PowerShell 安装及 PATH"
+                .into()
+        })
 }
 
 #[cfg(windows)]

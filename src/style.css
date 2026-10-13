@@ -272,6 +272,12 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .project-branch svg { width: 14px; height: 14px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.25; }
 .project-branch-label { flex: 0 0 auto; color: var(--muted); font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; font-size: 10px; font-weight: 650; }
 .project-branch > .overflow-tooltip-trigger { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-copy-value { min-width: 0; border: 0; color: inherit; background: transparent; cursor: pointer; font: inherit; text-align: left; transition: color .16s ease, text-shadow .16s ease; }
+.project-copy-value:hover { color: var(--accent-strong); text-shadow: 0 0 0.01px currentColor; }
+.project-copy-value:focus-visible { border-radius: 3px; outline: 2px solid var(--accent); outline-offset: 3px; }
+.project-branch-value { display: inline-flex; align-items: center; gap: 0; }
+.project-path-value { display: block; width: 100%; padding: 0; }
+.project-path-value .overflow-tooltip-trigger { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-git-changes { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; color: var(--muted); font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif; font-size: 10px; white-space: nowrap; }
 .project-git-changes b { font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; font-weight: 700; }
 .project-git-changes .staged b { color: var(--accent-strong); }

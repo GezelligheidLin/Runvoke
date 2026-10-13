@@ -33,8 +33,7 @@ const selectedSourceIsSaved = computed(() =>
 
 const selectedSourceIsBuiltIn = computed(
     () =>
-        selectedSource.value?.id === "vscode" ||
-        selectedSource.value?.id === "zed",
+        selectedSource.value?.id === "vscode",
 );
 
 const validationMessage = computed(() => {
@@ -274,8 +273,7 @@ function handleDialogKeydown(event: KeyboardEvent) {
                                             </OverflowTooltip>
                                             <small
                                                 v-if="
-                                                    source.id === 'vscode' ||
-                                                    source.id === 'zed'
+                                                    source.id === 'vscode'
                                                 "
                                                 >内置</small
                                             >
@@ -340,7 +338,7 @@ function handleDialogKeydown(event: KeyboardEvent) {
                                             type="text"
                                             maxlength="120"
                                             autocomplete="off"
-                                            placeholder="例如 Zed"
+                                            placeholder="例如 Visual Studio Code"
                                         />
                                     </label>
                                     <label>

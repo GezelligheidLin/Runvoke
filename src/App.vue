@@ -482,6 +482,27 @@ function copyTextFallback(text: string) {
     if (!copied) throw new Error("系统拒绝了剪贴板操作");
 }
 
+async function copyValue(value: string, label: string) {
+    try {
+        if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value);
+        else copyTextFallback(value);
+        notify("success", `${label}已复制`);
+    } catch (error) {
+        notify("error", `复制${label}失败：${String(error)}`);
+    }
+}
+
+async function copyVisibleLogs() {
+    if (!visibleLogs.value.length) {
+        notify("error", "当前没有可复制的日志");
+        return;
+    }
+    const content = visibleLogs.value
+        .map((entry) => `[${formatTime(entry.timestamp)}] ${entry.stream.toUpperCase()} ${entry.message}`)
+        .join("\n");
+    await copyValue(content, logFilter.value === "all" ? "全部日志" : `${logFilter.value} 日志`);
+}
+
 const filteredProjects = computed(() => {
     const keyword = search.value.trim().toLocaleLowerCase();
     if (!keyword) return projects.value;
@@ -617,7 +638,7 @@ const inactiveRunCount = computed(
 );
 
 watch(
-    () => visibleLogs.value.length,
+    visibleLogs,
     async () => {
         await nextTick();
         if (autoScroll.value && logContainer.value)
@@ -2150,7 +2171,7 @@ function stateLabel(state?: string) {
                             />
                             <div>
                                 <strong>Runvoke</strong>
-                                <span>本地开发工作台</span>
+                                <span>本地项目运行控制台</span>
                             </div>
                             <button
                                 class="settings-button"
@@ -2737,13 +2758,18 @@ function stateLabel(state?: string) {
                                             <span class="project-branch-label"
                                                 >分支</span
                                             >
-                                            <OverflowTooltip
-                                                as="span"
-                                                :text="`Git 分支：${selectedProject.gitBranch}`"
-                                                >{{
-                                                    selectedProject.gitBranch
-                                                }}</OverflowTooltip
+                                            <button
+                                                class="project-copy-value project-branch-value"
+                                                type="button"
+                                                :aria-label="`复制 Git 分支 ${selectedProject.gitBranch}`"
+                                                :title="`复制分支：${selectedProject.gitBranch}`"
+                                                @click="copyValue(selectedProject.gitBranch, '分支')"
                                             >
+                                                <OverflowTooltip
+                                                    as="span"
+                                                    :text="`Git 分支：${selectedProject.gitBranch}`"
+                                                >{{ selectedProject.gitBranch }}</OverflowTooltip>
+                                            </button>
                                             <span
                                                 v-if="
                                                     selectedProject.stagedChanges !==
@@ -2774,13 +2800,17 @@ function stateLabel(state?: string) {
                                             </span>
                                         </span>
                                     </div>
-                                    <OverflowTooltip
-                                        as="code"
-                                        :text="selectedProject.directory"
-                                        >{{
-                                            selectedProject.directory
-                                        }}</OverflowTooltip
+                                    <button
+                                        class="project-copy-value project-path-value"
+                                        type="button"
+                                        :aria-label="`复制项目路径 ${selectedProject.directory}`"
+                                        :title="`复制路径：${selectedProject.directory}`"
+                                        @click="copyValue(selectedProject.directory, '路径')"
                                     >
+                                        <OverflowTooltip as="code" :text="selectedProject.directory">
+                                            {{ selectedProject.directory }}
+                                        </OverflowTooltip>
+                                    </button>
                                 </div>
                                 <div class="header-actions">
                                     <span
@@ -3151,6 +3181,19 @@ function stateLabel(state?: string) {
                                                 </div>
                                                 <div class="terminal-actions">
                                                     <button
+                                                        class="clear-button terminal-control-button"
+                                                        type="button"
+                                                        aria-label="复制当前日志"
+                                                        title="复制当前日志"
+                                                        @click="copyVisibleLogs"
+                                                    >
+                                                        <svg class="terminal-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+                                                            <rect x="8" y="8" width="10" height="11" rx="1" />
+                                                            <path d="M6 16H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1" />
+                                                        </svg>
+                                                        <span class="terminal-control-text">复制日志</span>
+                                                    </button>
+                                                    <button
                                                         v-if="
                                                             primaryLocalhostLogEntryId
                                                         "
@@ -3301,7 +3344,7 @@ function stateLabel(state?: string) {
                                                         v-for="entry in visibleLogs"
                                                         :key="entry.id"
                                                         v-memo="[
-                                                            entry.id,
+                                                            entry,
                                                             logLinkAction,
                                                         ]"
                                                         class="log-line"

@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 mod mcp_server;
 mod task_shell;
+mod terminal_logs;
 mod window_resize_guard;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,20 +156,12 @@ const fn default_mcp_port() -> u16 {
 }
 
 fn default_open_sources() -> Vec<OpenSourceConfig> {
-    vec![
-        OpenSourceConfig {
-            id: "vscode".into(),
-            name: "Visual Studio Code".into(),
-            executable: "code".into(),
-            arguments: "\"{directory}\"".into(),
-        },
-        OpenSourceConfig {
-            id: "zed".into(),
-            name: "Zed".into(),
-            executable: "zed".into(),
-            arguments: "\"{directory}\"".into(),
-        },
-    ]
+    vec![OpenSourceConfig {
+        id: "vscode".into(),
+        name: "Visual Studio Code".into(),
+        executable: "code".into(),
+        arguments: "\"{directory}\"".into(),
+    }]
 }
 
 fn source_uses_reserved_shell(executable: &str) -> bool {
@@ -230,7 +223,7 @@ fn validate_open_source(source: &OpenSourceConfig) -> Result<(), String> {
 }
 
 fn normalize_open_sources(sources: &mut Vec<OpenSourceConfig>) {
-    sources.retain(|source| validate_open_source(source).is_ok());
+    sources.retain(|source| source.id != "zed" && validate_open_source(source).is_ok());
     let mut seen = HashSet::new();
     sources.retain(|source| seen.insert(source.id.clone()));
 }
@@ -451,9 +444,7 @@ fn assign_process_to_job(
 #[cfg(target_os = "windows")]
 fn terminate_process_by_pid(pid: u32) {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
     if !handle.is_null() {
         unsafe {
@@ -1470,17 +1461,23 @@ fn emit_log_with_mode(
     message: impl Into<String>,
     mode: &str,
 ) {
+    let message = truncate_log_message(message.into());
+    let mode = if mode == "append" && terminal_logs::is_webpack_progress(&message) {
+        "progress"
+    } else {
+        mode
+    };
     let event = LogEvent {
         run_id: run_id.to_owned(),
         project_id: project_id.to_owned(),
         stream: stream.to_owned(),
-        message: truncate_log_message(message.into()),
+        message,
         timestamp: now_millis(),
         mode: mode.to_owned(),
     };
     if let Ok(mut logs) = app.state::<AppState>().logs.lock() {
         let history = logs.entry(event.run_id.clone()).or_default();
-        history.push(event.clone());
+        record_log_history(history, &event);
         if history.len() > MCP_LOG_HISTORY_LIMIT {
             history.drain(..history.len() - MCP_LOG_HISTORY_LIMIT);
         }
@@ -1492,6 +1489,21 @@ fn emit_log_with_mode(
     } else {
         let _ = app.emit("project-logs", vec![event]);
     }
+}
+
+fn record_log_history(history: &mut Vec<LogEvent>, event: &LogEvent) {
+    let active = history
+        .iter()
+        .rposition(|entry| entry.stream == event.stream && entry.mode == "progress");
+    if event.mode != "append" {
+        if let Some(index) = active {
+            history[index] = event.clone();
+            return;
+        }
+    } else if let Some(index) = active {
+        history[index].mode = "finish".into();
+    }
+    history.push(event.clone());
 }
 
 fn truncate_log_message(mut message: String) -> String {
@@ -1553,50 +1565,20 @@ fn pipe_logs<R: Read + Send + 'static>(
     thread::spawn(move || {
         let mut reader = BufReader::new(reader);
         let mut chunk = [0_u8; 8_192];
-        let mut line = Vec::new();
-        let mut last_progress = Vec::new();
-        let mut progress_active = false;
+        let mut parser = terminal_logs::TerminalLogParser::default();
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(length) => {
-                    for &byte in &chunk[..length] {
-                        match byte {
-                            b'\r' => {
-                                if !line.is_empty() {
-                                    last_progress.clone_from(&line);
-                                    emit_log_with_mode(
-                                        &app,
-                                        &run_id,
-                                        &project_id,
-                                        stream,
-                                        String::from_utf8_lossy(&line).into_owned(),
-                                        "progress",
-                                    );
-                                }
-                                line.clear();
-                                progress_active = true;
-                            }
-                            b'\n' => {
-                                let completed = if line.is_empty() && progress_active {
-                                    &last_progress
-                                } else {
-                                    &line
-                                };
-                                emit_log_with_mode(
-                                    &app,
-                                    &run_id,
-                                    &project_id,
-                                    stream,
-                                    String::from_utf8_lossy(completed).into_owned(),
-                                    if progress_active { "finish" } else { "append" },
-                                );
-                                line.clear();
-                                last_progress.clear();
-                                progress_active = false;
-                            }
-                            _ => line.push(byte),
-                        }
+                    for update in parser.feed(&chunk[..length]) {
+                        emit_log_with_mode(
+                            &app,
+                            &run_id,
+                            &project_id,
+                            stream,
+                            update.message,
+                            update.mode,
+                        );
                     }
                 }
                 Err(error) => {
@@ -1611,19 +1593,14 @@ fn pipe_logs<R: Read + Send + 'static>(
                 }
             }
         }
-        if !line.is_empty() || progress_active {
-            let completed = if line.is_empty() {
-                &last_progress
-            } else {
-                &line
-            };
+        for update in parser.finish() {
             emit_log_with_mode(
                 &app,
                 &run_id,
                 &project_id,
                 stream,
-                String::from_utf8_lossy(completed).into_owned(),
-                if progress_active { "finish" } else { "append" },
+                update.message,
+                update.mode,
             );
         }
     });
@@ -1637,7 +1614,13 @@ fn shell_command(command_line: &str) -> Result<Command, String> {
         let script = task_shell::powershell_script(command_line);
         let mut command = Command::new(task_shell::resolve_powershell()?);
         command
-            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script])
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &script,
+            ])
             .creation_flags(CREATE_NO_WINDOW);
         Ok(command)
     }
@@ -2872,6 +2855,68 @@ fn stop_all_processes(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_history_replaces_only_the_same_stream_and_preserves_final_output() {
+        let mut history = Vec::new();
+        for (stream, message, mode) in [
+            ("stderr", "10%", "progress"),
+            ("stdout", "ordinary", "append"),
+            ("stderr", "20%", "progress"),
+            ("stdout", "stdout progress", "progress"),
+            ("stderr", "100%", "finish"),
+            ("stderr", "error", "append"),
+            ("stderr", "next build", "progress"),
+        ] {
+            record_log_history(
+                &mut history,
+                &LogEvent {
+                    run_id: "run-1".into(),
+                    project_id: "project-1".into(),
+                    stream: stream.into(),
+                    message: message.into(),
+                    timestamp: 0,
+                    mode: mode.into(),
+                },
+            );
+        }
+        assert_eq!(
+            history
+                .iter()
+                .map(|entry| (entry.message.as_str(), entry.mode.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("100%", "finish"),
+                ("ordinary", "append"),
+                ("stdout progress", "progress"),
+                ("error", "append"),
+                ("next build", "progress")
+            ]
+        );
+    }
+
+    #[test]
+    fn normal_output_finalizes_the_previous_progress_history_entry() {
+        let mut history = Vec::new();
+        let mut event = LogEvent {
+            run_id: "run-1".into(),
+            project_id: "project-1".into(),
+            stream: "stdout".into(),
+            message: "progress".into(),
+            timestamp: 0,
+            mode: "progress".into(),
+        };
+        record_log_history(&mut history, &event);
+        event.mode = "append".into();
+        event.message = "done".into();
+        record_log_history(&mut history, &event);
+        event.mode = "progress".into();
+        event.message = "next".into();
+        record_log_history(&mut history, &event);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].mode, "finish");
+        assert_eq!(history[1].message, "done");
+    }
 
     fn project(tasks: Vec<ProjectTask>) -> ProjectConfig {
         ProjectConfig {
