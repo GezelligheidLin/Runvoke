@@ -52,6 +52,10 @@ Runvoke 是一个本地桌面项目启动器，解决多个开发项目需要分
 - `main` 仅承载稳定正式版；`develop` 用于未完成新功能的预览集成，功能开发从 `develop` 创建 `feature/<功能名>` 分支。`develop` 不创建正式发布标签，但可使用带预发布标识的版本创建 GitHub Pre-release；预发布必须写入 OSS 的独立预览更新清单，不能覆盖稳定更新清单，且客户端默认不检查预览版。
 - MCP 默认关闭，仅绑定回环地址；前端仅展示本机连接所需配置，后端不得接受远程监听地址，也不得将认证令牌输出到日志。
 
+## Windows 原生重写分支
+
+在 `feature/winui3-csharp-rewrite` 上，Runvoke 同步维护 Windows 原生客户端：UI 使用 WinUI 3、C#/.NET 8 和 Windows App SDK，入口位于 `native/Runvoke.WinUI`。现有 Tauri/Vue/Rust 客户端继续作为功能基线，直到原生客户端完成 parity；项目配置 JSON、`taskId`/`runId` 隔离、进程树回收、日志有界解析、MCP 认证和更新安全约束必须保持兼容。原生客户端不得通过 shell 启动用户配置的软件源，进程窗口必须隐藏，停止操作必须按运行实例回收完整子进程树。
+
 ## AI 工作规则
 
 - 先阅读根目录 `AGENTS.md`，保持现有技术栈、架构和编码约定。

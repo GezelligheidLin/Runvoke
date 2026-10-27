@@ -1,0 +1,42 @@
+<Window
+    x:Class="Runvoke.WinUI.NotificationWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Runvoke 通知">
+  <Grid x:Name="Root" Background="Transparent" IsHitTestVisible="True" Padding="12">
+    <ItemsControl x:Name="Cards" ItemsSource="{x:Bind ViewModel.Items, Mode=OneWay}" LayoutUpdated="Cards_LayoutUpdated">
+      <ItemsControl.ItemsPanel>
+        <ItemsPanelTemplate>
+          <Canvas />
+        </ItemsPanelTemplate>
+      </ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate>
+        <DataTemplate>
+          <Border Background="{ThemeResource RunvokeSurfaceBrush}"
+                  BorderBrush="{ThemeResource RunvokeLineStrongBrush}"
+                  BorderThickness="1"
+                  CornerRadius="8"
+                  Padding="14"
+                  IsHitTestVisible="True"
+                  Tapped="Card_Tapped"
+                  PointerEntered="Card_PointerEntered"
+                  PointerExited="Card_PointerExited">
+            <Grid>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+              </Grid.RowDefinitions>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Loaded="OverflowText_Loaded" SizeChanged="OverflowText_SizeChanged" />
+              <Button Grid.Column="1" Content="关闭" Tag="{Binding Id}" Click="CloseButton_Click" Padding="8,2" />
+              <TextBlock Grid.Row="1" Text="{Binding Message}" Opacity="0.75" TextWrapping="Wrap" MaxLines="3" Margin="0,8,0,0" Loaded="OverflowText_Loaded" SizeChanged="OverflowText_SizeChanged" />
+            </Grid>
+          </Border>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+  </Grid>
+</Window>

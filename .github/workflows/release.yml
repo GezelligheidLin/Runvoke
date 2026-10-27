@@ -13,6 +13,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -38,6 +40,26 @@ jobs:
           if ($version -ne $tauriVersion) { throw "package.json ($version) and tauri.conf.json ($tauriVersion) must match." }
           if ($version -ne $cargoVersion) { throw "package.json ($version) and Cargo.toml ($cargoVersion) must match." }
           if ("v$version" -ne '${{ github.ref_name }}') { throw "Release tag must be v$version." }
+
+      - name: Verify release channel and source branch
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $isPreRelease = $tag.Contains('-')
+          if ($isPreRelease -and $tag -notmatch '^v\d+\.\d+\.\d+-(dev|alpha|beta|rc)\.\d+$') {
+            throw "Pre-release tags must use a SemVer channel suffix, for example v0.1.13-dev.1."
+          }
+          if (-not $isPreRelease -and $tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Stable release tags must use vMAJOR.MINOR.PATCH."
+          }
+          $branches = @(git branch -r --contains $env:RELEASE_SHA)
+          $branch = if ($isPreRelease) { 'origin/develop' } else { 'origin/main' }
+          if (-not ($branches | Where-Object { $_.Trim() -eq $branch })) {
+            throw "$tag must be created from $branch."
+          }
 
       - name: Build signed updater package
         run: pnpm tauri build
@@ -82,14 +104,17 @@ jobs:
           if (-not $installer) { throw 'NSIS installer was not generated.' }
           $signaturePath = "$($installer.FullName).sig"
           if (-not (Test-Path $signaturePath)) { throw 'Updater signature was not generated.' }
+          $sha256 = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $downloadUrl = "$($env:ALIYUN_OSS_PUBLIC_BASE_URL.TrimEnd('/'))/releases/${{ github.ref_name }}/$($installer.Name)"
           $manifest = @{
             version = $version
             notes = $releaseNotes
+            sha256 = $sha256
             pub_date = (Get-Date).ToUniversalTime().ToString('o')
             platforms = @{
               'windows-x86_64' = @{
                 signature = (Get-Content $signaturePath -Raw).Trim()
+                sha256 = $sha256
                 url = $downloadUrl
               }
             }

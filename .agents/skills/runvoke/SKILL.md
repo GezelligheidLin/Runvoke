@@ -67,3 +67,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - `.agents/skills/runvoke/SKILL.md`
 
 仅修改不影响上述内容的实现细节时，应在交付说明中说明无需同步文档的原因。
+
+## Windows 原生重写分支
+
+`feature/winui3-csharp-rewrite` 的原生客户端使用 WinUI 3、C#/.NET 8 和 Windows App SDK，代码位于 `native/Runvoke.WinUI`。现有 Tauri/Vue/Rust 客户端在迁移完成前继续保留；原生客户端必须兼容 `projects.json`、任务与运行实例模型，并逐步复用或等价实现 Rust 的进程隐藏、子进程树回收、终端日志解析、敏感信息脱敏、更新签名校验和 MCP 回环认证。修改原生客户端时，优先在可用的 Windows + .NET SDK 环境执行 `dotnet restore`、`dotnet build`，当前环境缺少 SDK 时须在交付说明中明确记录。

@@ -52,6 +52,10 @@ Runvoke 是面向本地开发者的桌面项目启动器。它将多个项目的
 - 包管理器：pnpm 10
 - 发布与更新：GitHub Actions、阿里云 OSS、GitHub Releases、Tauri Updater
 
+## Windows 原生重写分支
+
+`feature/winui3-csharp-rewrite` 用于逐步重建 Windows 原生客户端，目标技术栈为 WinUI 3、C#/.NET 8 和 Windows App SDK。重写期间保留现有 Tauri 版本作为可用基线，不直接替换稳定入口；项目配置格式和 `runId` 运行实例契约保持兼容。原生入口位于 `native/Runvoke.WinUI`，已覆盖工作区、项目与任务、分组排序、拖入和导入、隐藏 PowerShell 进程、stdout/stderr 与终端进度日志、Job Object 子进程树回收、通知、托盘、更新、MCP 和 Windows 设置集成；完整 MSIX/XAML 打包仍需在安装 Visual Studio Windows App SDK 工具链的 Windows 环境完成验收。
+
 ## 目录说明
 
 ```text

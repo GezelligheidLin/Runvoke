@@ -8,5 +8,11 @@ output
 !.vscode/extensions.json
 src-tauri/target
 src-tauri/target-package
+native/**/bin
+native/**/obj
 *.log
 .DS_Store
+.dotnet/
+.tmp-dotnet-install.ps1
+native/bin/
+native/obj/

@@ -1,0 +1,44 @@
+<Application
+    x:Class="Runvoke.WinUI.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls">
+  <Application.Resources>
+    <ResourceDictionary>
+      <muxc:XamlControlsResources />
+      <Color x:Key="SystemAccentColor">#637E68</Color>
+      <SolidColorBrush x:Key="SystemControlHighlightAccentBrush" Color="#637E68" />
+      <SolidColorBrush x:Key="SystemControlHighlightAltAccentBrush" Color="#637E68" />
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="RunvokeCanvasBrush" Color="#F7F5F1" />
+          <SolidColorBrush x:Key="RunvokeSidebarBrush" Color="#EFEBE4" />
+          <SolidColorBrush x:Key="RunvokeSurfaceBrush" Color="#FFFDF9" />
+          <SolidColorBrush x:Key="RunvokeLineBrush" Color="#DED8CF" />
+          <SolidColorBrush x:Key="RunvokeLineStrongBrush" Color="#CBC3B8" />
+          <SolidColorBrush x:Key="RunvokeInkBrush" Color="#302D29" />
+          <SolidColorBrush x:Key="RunvokeMutedBrush" Color="#766F66" />
+          <SolidColorBrush x:Key="RunvokeAccentBrush" Color="#637E68" />
+          <SolidColorBrush x:Key="RunvokeTerminalBrush" Color="#282A27" />
+          <SolidColorBrush x:Key="RunvokeTerminalInkBrush" Color="#EDF0EA" />
+          <SolidColorBrush x:Key="RunvokeTerminalMutedBrush" Color="#B8C0B8" />
+          <SolidColorBrush x:Key="RunvokeTerminalLinkBrush" Color="#A8D0AA" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="RunvokeCanvasBrush" Color="#171A18" />
+          <SolidColorBrush x:Key="RunvokeSidebarBrush" Color="#1E2320" />
+          <SolidColorBrush x:Key="RunvokeSurfaceBrush" Color="#252A27" />
+          <SolidColorBrush x:Key="RunvokeLineBrush" Color="#3B443E" />
+          <SolidColorBrush x:Key="RunvokeLineStrongBrush" Color="#535F56" />
+          <SolidColorBrush x:Key="RunvokeInkBrush" Color="#EDF0EA" />
+          <SolidColorBrush x:Key="RunvokeMutedBrush" Color="#AFB7AF" />
+          <SolidColorBrush x:Key="RunvokeAccentBrush" Color="#8DB38F" />
+          <SolidColorBrush x:Key="RunvokeTerminalBrush" Color="#121513" />
+          <SolidColorBrush x:Key="RunvokeTerminalInkBrush" Color="#EDF0EA" />
+          <SolidColorBrush x:Key="RunvokeTerminalMutedBrush" Color="#9BA79D" />
+          <SolidColorBrush x:Key="RunvokeTerminalLinkBrush" Color="#A8D0AA" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+</Application>

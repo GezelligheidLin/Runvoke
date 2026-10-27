@@ -63,3 +63,7 @@
 
 - 修改项目目标、功能范围、技术栈、目录结构、运行方式或验收标准时，必须同步更新 `PROJECT_OVERVIEW.md`、`.agents/PROJECT_PROMPT.md` 与 `.agents/skills/runvoke/SKILL.md`。
 - 仅修改实现细节且不影响上述内容时，无需更新项目文档，但应在交付说明中注明原因。
+
+## Windows 原生重写分支
+
+`feature/winui3-csharp-rewrite` 用于 WinUI 3 + C#/.NET 8 的 Windows 原生客户端重写，入口位于 `native/Runvoke.WinUI`。现有 Tauri/Vue/Rust 客户端在原生版本完成完整功能验证前继续作为基线；原生版本必须兼容现有项目配置和 `runId` 运行实例契约，并保持隐藏窗口、完整子进程树回收、日志有界解析、敏感信息保护、MCP 回环认证和签名更新等约束。
